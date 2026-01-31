@@ -1,0 +1,25 @@
+{
+  "state": "PRINTING",
+  "progress": 45.5,
+  "time_remaining": 1800,
+  "temp_nozzle": 215.0,
+  "temp_bed": 60.0,
+  "file_name": "benchy.gcode",
+  "printer": {
+    "state": "PRINTING",
+    "temp_nozzle": 215.0,
+    "temp_bed": 60.0,
+    "flow": 100,
+    "speed": 100
+  },
+  "job": {
+    "id": "abc123",
+    "progress": 45.5,
+    "time_remaining": 1800,
+    "time_printing": 1200,
+    "file": {
+      "name": "benchy.gcode",
+      "size": 2457680
+    }
+  }
+}

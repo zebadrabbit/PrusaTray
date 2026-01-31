@@ -654,11 +654,11 @@ class HttpJsonAdapter(QObject):
         Fetch state asynchronously.
         
         Emits state_fetched on success or state_error on failure.
-        Does NOT block.
+        Does NOT block. Uses 5-second timeout for responsiveness.
         """
         url = QUrl(f"{self.base_url}{self.endpoint}")
         request = QNetworkRequest(url)
-        request.setTransferTimeout(10000)  # 10s timeout
+        request.setTransferTimeout(5000)  # 5s timeout - fail fast for better UX
         request.setRawHeader(b"Accept", b"application/json")
         
         # Add authentication headers if configured
@@ -673,37 +673,145 @@ class HttpJsonAdapter(QObject):
         reply.finished.connect(lambda: self._handle_reply(reply))
     
     def _handle_reply(self, reply: QNetworkReply) -> None:
-        """Handle network reply."""
+        """
+        Handle network reply with comprehensive error handling.
+        
+        Never throws - always emits either state_fetched or state_error.
+        Handles malformed JSON gracefully.
+        """
         try:
             error = reply.error()
             http_status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
             self._last_http_status = http_status
             
             if error == QNetworkReply.NetworkError.NoError:
+                # Success - parse response
                 data = reply.readAll().data()
-                import json
-                parsed = json.loads(data.decode('utf-8'))
-                state = self.parse_response(parsed)
-                state.last_ok_timestamp = datetime.now()
-                self.state_fetched.emit(state)
+                
+                # Parse JSON with error handling
+                try:
+                    import json
+                    parsed = json.loads(data.decode('utf-8'))
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON from {self.base_url}: {e}")
+                    error_state = PrinterState(
+                        status=PrinterStatus.ERROR,
+                        error_message="Invalid JSON response",
+                        message=f"Server returned malformed JSON: {str(e)[:100]}"
+                    )
+                    self.state_fetched.emit(error_state)
+                    return
+                except UnicodeDecodeError as e:
+                    logger.error(f"Invalid encoding from {self.base_url}: {e}")
+                    error_state = PrinterState(
+                        status=PrinterStatus.ERROR,
+                        error_message="Invalid response encoding",
+                        message=f"Server returned non-UTF8 data"
+                    )
+                    self.state_fetched.emit(error_state)
+                    return
+                
+                # Parse to PrinterState
+                try:
+                    state = self.parse_response(parsed)
+                    state.last_ok_timestamp = datetime.now()
+                    self.state_fetched.emit(state)
+                except Exception as e:
+                    logger.error(f"Failed to parse response from {self.base_url}: {e}", exc_info=True)
+                    error_state = PrinterState(
+                        status=PrinterStatus.ERROR,
+                        error_message="Parse error",
+                        message=f"Could not parse printer state: {str(e)[:100]}"
+                    )
+                    self.state_fetched.emit(error_state)
+                    
             elif http_status == 401 or http_status == 403:
                 # Authentication failure
                 error_msg = f"Authentication failed (HTTP {http_status})"
-                logger.error(error_msg)
-                # Emit error state with auth failure message
+                logger.error(f"{self.base_url}: {error_msg}")
                 error_state = PrinterState(
                     status=PrinterStatus.ERROR,
-                    error_message="Auth failed - check credentials",
-                    message=error_msg
+                    error_message="Authentication failed",
+                    message="Check credentials in configuration"
                 )
                 self.state_fetched.emit(error_state)
+                
+            elif http_status == 404:
+                # Not found - might be wrong endpoint
+                error_msg = f"Endpoint not found (HTTP 404): {self.endpoint}"
+                logger.error(f"{self.base_url}: {error_msg}")
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Endpoint not found",
+                    message=f"API endpoint {self.endpoint} does not exist"
+                )
+                self.state_fetched.emit(error_state)
+                
+            elif http_status and 500 <= http_status < 600:
+                # Server error
+                error_msg = f"Server error (HTTP {http_status})"
+                logger.warning(f"{self.base_url}: {error_msg}")
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Server error",
+                    message=f"Printer returned HTTP {http_status}"
+                )
+                self.state_fetched.emit(error_state)
+                
+            elif error == QNetworkReply.NetworkError.TimeoutError:
+                # Timeout
+                logger.warning(f"{self.base_url}: Request timeout (5s)")
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Timeout",
+                    message="Printer did not respond within 5 seconds"
+                )
+                self.state_fetched.emit(error_state)
+                
+            elif error == QNetworkReply.NetworkError.HostNotFoundError:
+                # Host not found
+                logger.warning(f"{self.base_url}: Host not found")
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Host not found",
+                    message="Could not resolve printer hostname/IP"
+                )
+                self.state_fetched.emit(error_state)
+                
+            elif error == QNetworkReply.NetworkError.ConnectionRefusedError:
+                # Connection refused
+                logger.warning(f"{self.base_url}: Connection refused")
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Connection refused",
+                    message="Printer refused connection - is it powered on?"
+                )
+                self.state_fetched.emit(error_state)
+                
             else:
+                # Generic network error
                 error_string = reply.errorString()
-                logger.warning(f"Network error: {error_string}")
-                self.state_error.emit(error_string)
+                logger.warning(f"{self.base_url}: Network error: {error_string}")
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Network error",
+                    message=error_string[:100]
+                )
+                self.state_fetched.emit(error_state)
+                
         except Exception as e:
-            logger.error(f"Parse error: {e}", exc_info=True)
-            self.state_error.emit(str(e))
+            # Catch-all for unexpected errors
+            logger.error(f"Unexpected error handling reply from {self.base_url}: {e}", exc_info=True)
+            try:
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Internal error",
+                    message=str(e)[:100]
+                )
+                self.state_fetched.emit(error_state)
+            except:
+                # Last resort - log but don't crash
+                logger.critical(f"Failed to emit error state: {e}")
         finally:
             reply.deleteLater()
     
@@ -793,6 +901,7 @@ class PrusaLinkAdapter(HttpJsonAdapter):
         Fetch state with automatic endpoint fallback.
         
         Tries /api/v1/status first, falls back to /api/job if needed.
+        Uses 5-second timeout for responsiveness.
         """
         # If we already know which endpoint works, use it
         if self._use_legacy or self._tried_v1:
@@ -802,7 +911,7 @@ class PrusaLinkAdapter(HttpJsonAdapter):
         # First time: try v1 endpoint
         url = QUrl(f"{self.base_url}/api/v1/status")
         request = QNetworkRequest(url)
-        request.setTransferTimeout(10000)
+        request.setTransferTimeout(5000)  # 5s timeout - fail fast
         request.setRawHeader(b"Accept", b"application/json")
         
         # Add authentication headers

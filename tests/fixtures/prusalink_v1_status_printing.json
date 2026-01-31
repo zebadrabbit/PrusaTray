@@ -1,0 +1,31 @@
+{
+  "printer": {
+    "state": "PRINTING",
+    "temp_nozzle": 215.0,
+    "temp_bed": 60.0,
+    "target_nozzle": 220.0,
+    "target_bed": 60.0,
+    "axis_x": 125.5,
+    "axis_y": 98.3,
+    "axis_z": 15.7,
+    "flow": 100,
+    "speed": 100,
+    "fan_hotend": 3500,
+    "fan_print": 4200
+  },
+  "job": {
+    "id": 123,
+    "progress": 42.5,
+    "time_remaining": 1847,
+    "time_printing": 982,
+    "file": {
+      "name": "benchy.gcode"
+    }
+  },
+  "storage": {
+    "path": "/usb/",
+    "name": "benchy.gcode",
+    "size": 2457680,
+    "m_timestamp": 1706745600
+  }
+}

@@ -180,9 +180,32 @@ Configuration is stored in `%LOCALAPPDATA%\PrusaTray\config.json`:
 
 ### Backend-Specific Configuration
 
+#### Demo Backend (Default)
+
+For testing without a real printer:
+
+```json
+{
+  "backend": "demo",
+  "printer_base_url": null,
+  "poll_interval_s": 3.0,
+  "icon_style": "ring"
+}
+```
+
+Simulates a 2-minute print cycle with pause and idle phases. No network calls - perfect for development and testing.
+
+**Features:**
+- No printer required
+- Simulates realistic print progression
+- Shows all printer states (PRINTING → PAUSED → IDLE)
+- Safe to leave running continuously
+
+---
+
 #### PrusaConnect Backend
 
-For **PrusaConnect** cloud monitoring, you need a bearer token from your Prusa account:
+For **PrusaConnect** cloud monitoring:
 
 ```json
 {
@@ -190,61 +213,129 @@ For **PrusaConnect** cloud monitoring, you need a bearer token from your Prusa a
   "printer_base_url": "https://connect.prusa3d.com",
   "bearer_token": "your_bearer_token_here",
   "printer_id": "your_printer_id",
-  "status_path": "/api/v1/status"
+  "status_path": "/api/v1/status",
+  "poll_interval_s": 10.0
 }
 ```
 
-- **bearer_token** (required): Bearer token from Prusa Connect account
-- **printer_id** (required): Your printer's unique identifier
-- **status_path** (optional): Custom API endpoint path (defaults to `/api/v1/status`)
+**Required fields:**
+- **bearer_token**: Bearer token from Prusa Connect account
+- **printer_id**: Your printer's unique identifier
+
+**Optional fields:**
+- **status_path**: Custom API endpoint (defaults to `/api/v1/status`)
+- **poll_interval_s**: Recommended 10+ seconds for cloud API (to avoid rate limiting)
 
 **How to get your bearer token:**
 1. Log in to [connect.prusa3d.com](https://connect.prusa3d.com)
-2. Navigate to account settings or API settings
+2. Navigate to account settings → API settings
 3. Generate an API token/bearer token
 4. Copy and paste into `bearer_token` field
 
-> **Note:** PrusaConnect uses bearer token authentication instead of username/password. The `auth_mode` setting is ignored for PrusaConnect.
+**Timeouts:** 5-second request timeout. Cloud API should respond quickly.
+
+> **Note:** PrusaConnect uses bearer token authentication. The `auth_mode` and `username` settings are ignored.
+
+---
 
 #### PrusaLink Backend
 
-For **PrusaLink** (local printer API):
+For **PrusaLink** (local printer API with digest auth):
 
 ```json
 {
   "backend": "prusalink",
   "printer_base_url": "http://192.168.1.100",
+  "auth_mode": "digest",
   "username": "maker",
-  "auth_mode": "digest"
+  "password_key": "prusalink:mk4-office",
+  "poll_interval_s": 3.0,
+  "icon_style": "ring"
 }
 ```
 
-Supports digest authentication with automatic endpoint fallback (`/api/v1/status` → `/api/job`).
+**Required fields:**
+- **printer_base_url**: Local IP address of your Prusa printer (e.g., `http://192.168.1.100`)
+- **auth_mode**: Set to `"digest"` for PrusaLink
+- **username**: PrusaLink username (default is `"maker"`)
+- **password_key**: Reference name for secure credential storage
+
+**Features:**
+- Automatic endpoint detection (tries `/api/v1/status` → falls back to `/api/job`)
+- Digest authentication
+- Supports both modern and legacy PrusaLink formats
+- 5-second timeout for local network
+
+**First-time setup:**
+1. Configure as above with `password_key`
+2. Start PrusaTray - you'll be prompted for the password
+3. Password is stored securely in Windows Credential Manager
+4. Future startups retrieve it automatically
+
+---
 
 #### OctoPrint Backend
 
-For **OctoPrint**:
+For **OctoPrint** (API key authentication):
 
 ```json
 {
   "backend": "octoprint",
   "printer_base_url": "http://192.168.1.200",
-  "username": "your_api_key_name",
-  "auth_mode": "apikey"
+  "auth_mode": "apikey",
+  "username": "octoprint-api",
+  "password_key": "octoprint:mk3s-garage",
+  "poll_interval_s": 3.0,
+  "icon_style": "ring"
 }
 ```
 
-Uses API key authentication via `X-Api-Key` header.
+**Required fields:**
+- **printer_base_url**: OctoPrint server URL (e.g., `http://192.168.1.200` or `http://octopi.local`)
+- **auth_mode**: Set to `"apikey"` for OctoPrint
+- **username**: Descriptive name (not used by OctoPrint, but required for credential storage)
+- **password_key**: Reference name for API key storage
+
+**How to get your API key:**
+1. Open OctoPrint web interface
+2. Settings → Application Keys → Generate
+3. Copy the generated API key
+4. Store it via:
+   ```python
+   from tray_prusa.keyring_util import set_secret
+   set_secret("octoprint:mk3s-garage", "YOUR_API_KEY_HERE")
+   ```
+   Or let PrusaTray prompt you on first startup
+
+**Features:**
+- Uses `/api/job` endpoint
+- API key authentication via `X-Api-Key` header
+- 5-second timeout for local network
+- Supports state as string or dict format
+
+---
+
+### Quick Backend Comparison
+
+| Backend | Network | Auth | Timeout | Endpoints |
+|---------|---------|------|---------|-----------|
+| **demo** | None | None | N/A | N/A - simulated |
+| **prusaconnect** | Cloud | Bearer token | 5s | `/api/v1/status` |
+| **prusalink** | Local | Digest | 5s | `/api/v1/status` + `/api/job` fallback |
+| **octoprint** | Local | API key | 5s | `/api/job` |
 
 ### Backend Swapping
 
-**Changing backends is literally one config change:**
+Changing backends requires only a config change:
 
 ```json
-// Switch from demo to PrusaLink (when implemented):
+// Switch from demo to PrusaLink:
 {
   "backend": "prusalink",
-  "printer_base_url": "http://192.168.1.100"
+  "printer_base_url": "http://192.168.1.100",
+  "auth_mode": "digest",
+  "username": "maker",
+  "password_key": "prusalink:office"
 }
 ```
 

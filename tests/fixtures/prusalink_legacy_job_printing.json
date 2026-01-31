@@ -1,0 +1,34 @@
+{
+  "state": "Printing",
+  "job": {
+    "file": {
+      "name": "calibration_cube.gcode",
+      "size": 1234567,
+      "date": 1706745600
+    },
+    "estimatedPrintTime": 3600,
+    "filament": {
+      "length": 15420,
+      "volume": 37.2
+    }
+  },
+  "currentZ": 12.4,
+  "progress": {
+    "completion": 67.5,
+    "filepos": 834291,
+    "printTime": 2430,
+    "printTimeLeft": 1170
+  },
+  "temperature": {
+    "tool0": {
+      "actual": 215.3,
+      "target": 220.0,
+      "offset": 0
+    },
+    "bed": {
+      "actual": 59.8,
+      "target": 60.0,
+      "offset": 0
+    }
+  }
+}
