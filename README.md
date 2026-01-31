@@ -1,6 +1,12 @@
 # PrusaTray
 
-Windows system tray application for monitoring Prusa printers.
+Windows system tray application for monitoring Prusa printers via PrusaLink and OctoPrint. Shows live status, print progress, and estimated time remaining.
+
+## Preview
+
+![PrusaTray Preview](docs/tray_preview.png)
+
+*System tray icon with progress ring indicator and detailed tooltip showing printer status, print progress, and estimated time remaining.*
 
 ## Features
 
@@ -31,27 +37,43 @@ Windows system tray application for monitoring Prusa printers.
 - **Configurable**: Polling interval and printer URL stored in config file
 - **Unit-testable**: Pure parsing functions separate from network I/O
 
+## Security & Privacy
+
+- **Credential storage**: Passwords and API keys are stored in Windows Credential Manager via the `keyring` library—never in plaintext config files
+- **Local network only**: The app polls your printer directly on your local network with no external connections
+- **No telemetry**: No data collection, tracking, or analytics of any kind
+- **Open source**: All code is available for inspection in this repository
+
+## Releases
+
+Download the latest `PrusaTray.exe` from the [Releases page](https://github.com/zebadrabbit/PrusaTray/releases). No installation required—just run the executable.
+
+**Note:** Windows SmartScreen may show a warning on first run since the executable is not code-signed. This is expected for unsigned applications. Click "More info" → "Run anyway" to proceed.
+
+For ongoing use, you'll need to manually download new versions from the Releases page when they become available.
+
 ## Installation
 
 ### For Development
 
 1. Clone the repository
 2. Create virtual environment:
-```bash
+```powershell
 python -m venv .venv
 ```
 
 3. Activate virtual environment:
-```bash
-# Windows PowerShell
+```powershell
+# PowerShell
 .\.venv\Scripts\Activate.ps1
-
-# Windows CMD
-.venv\Scripts\activate.bat
+```
+```cmd
+# CMD
+.\.venv\Scripts\activate.bat
 ```
 
 4. Install dependencies:
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
@@ -64,7 +86,7 @@ Download the latest `PrusaTray.exe` from releases and run it - no installation n
 ### Development Mode
 
 Run from source:
-```bash
+```powershell
 python -m tray_prusa
 ```
 
@@ -242,7 +264,7 @@ See [ADAPTER_ARCHITECTURE.md](ADAPTER_ARCHITECTURE.md#-adding-a-new-backend) for
 ## Type Safety
 
 All code uses type hints for better IDE support and error detection. Run type checking with:
-```bash
+```powershell
 mypy tray_prusa
 ```
 
@@ -250,23 +272,23 @@ mypy tray_prusa
 
 ### Unit Tests
 Run parser tests:
-```bash
+```powershell
 python -m unittest test_parser.py -v
 ```
 
 Run config UI tests:
-```bash
+```powershell
 python test_config_ui.py
 ```
 
 Run authentication tests:
-```bash
+```powershell
 python test_auth.py
 ```
 
 ### Icon Renderer Test
 Generate test icons for visual inspection:
-```bash
+```powershell
 python -m tray_prusa.icon
 ```
 
@@ -386,4 +408,4 @@ On Windows, keyring uses Windows Credential Manager (built-in).
 
 ## License
 
-This is a project skeleton for development purposes.
+MIT License - see [LICENSE](LICENSE) file for details.
