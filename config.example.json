@@ -1,0 +1,63 @@
+{
+  "_comment": "Example PrusaTray configuration with secure credential storage",
+  
+  "printer_base_url": "http://192.168.1.100",
+  "poll_interval_s": 3.0,
+  "backend": "prusalink",
+  "open_ui_path": "/",
+  "icon_style": "ring",
+  
+  "_auth_comment": "Authentication configuration",
+  "auth_mode": "digest",
+  "username": "maker",
+  "password_key": "prusalink:mk4-office",
+  
+  "_password_key_notes": [
+    "password_key is a reference name for the credential",
+    "Choose a descriptive name like 'prusalink:mk4-office' or 'octoprint:garage'",
+    "On first startup, you'll be prompted to enter the password",
+    "Password is stored securely in Windows Credential Manager",
+    "Never put the actual password in this config file!",
+    "",
+    "Alternative: Set environment variable",
+    "For password_key 'prusalink:mk4-office', set:",
+    "$env:PRUSATRAY_PASSWORD_PRUSALINK_MK4_OFFICE = 'your_password'",
+    "",
+    "See CREDENTIAL_STORAGE.md for complete documentation"
+  ],
+  
+  "_backend_examples": {
+    "demo": {
+      "backend": "demo",
+      "printer_base_url": null,
+      "_description": "Demo mode with simulated printer"
+    },
+    
+    "prusalink": {
+      "backend": "prusalink",
+      "printer_base_url": "http://192.168.1.100",
+      "auth_mode": "digest",
+      "username": "maker",
+      "password_key": "prusalink:office-mk4",
+      "_description": "Local PrusaLink with digest authentication"
+    },
+    
+    "octoprint": {
+      "backend": "octoprint",
+      "printer_base_url": "http://192.168.1.200",
+      "auth_mode": "apikey",
+      "username": "octoprint-api",
+      "password_key": "octoprint:mk3s",
+      "_description": "OctoPrint with API key authentication"
+    },
+    
+    "prusaconnect": {
+      "backend": "prusaconnect",
+      "printer_base_url": "https://connect.prusa3d.com",
+      "bearer_token": "your_bearer_token_here",
+      "printer_id": "your_printer_id",
+      "status_path": "/api/v1/status",
+      "_description": "PrusaConnect cloud monitoring (uses bearer_token instead of password_key)"
+    }
+  }
+}
