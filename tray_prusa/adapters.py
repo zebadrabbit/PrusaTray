@@ -46,6 +46,8 @@ def normalize_status(status_str: Optional[str]) -> PrinterStatus:
         return PrinterStatus.PAUSED
     elif status_upper in ("ERROR", "STOPPED", "FAILED"):
         return PrinterStatus.ERROR
+    elif status_upper == "OFFLINE":
+        return PrinterStatus.OFFLINE
     else:
         return PrinterStatus.UNKNOWN
 
@@ -290,31 +292,101 @@ def parse_prusalink_state(data: Dict[str, Any]) -> PrinterState:
 
 
 # ============================================================================
-# OCTOPRINT PARSING (TODO: Implement)
+# OCTOPRINT PARSING
 # ============================================================================
 
 def parse_octoprint_state(data: Dict[str, Any]) -> PrinterState:
     """
-    Parse OctoPrint API response.
+    Parse OctoPrint API response from /api/job endpoint.
     
-    TODO: Implement based on OctoPrint REST API.
-    See: https://docs.octoprint.org/en/master/api/
+    OctoPrint /api/job response format:
+    {
+      "state": "Printing",  // or {"text": "Printing", "flags": {...}}
+      "job": {
+        "file": {"name": "model.gcode"},
+        "estimatedPrintTime": 3600,
+        "filament": {...}
+      },
+      "progress": {
+        "completion": 42.5,      // 0-100 percentage
+        "printTime": 1200,       // seconds elapsed
+        "printTimeLeft": 1800    // seconds remaining
+      }
+    }
+    
+    Also supports /api/printer response with temperature data.
     
     Args:
         data: Parsed JSON from OctoPrint API.
     
     Returns:
         PrinterState.
-    
-    Raises:
-        KeyError, ValueError: If required fields missing or invalid.
     """
-    # TODO: Replace with actual OctoPrint format
-    # Example endpoints:
-    # - /api/printer (for temps and status)
-    # - /api/job (for job info)
+    try:
+        # Parse state - can be string or dict with "text" field
+        state_data = data.get("state")
+        if isinstance(state_data, dict):
+            status_str = state_data.get("text", "UNKNOWN")
+        elif isinstance(state_data, str):
+            status_str = state_data
+        else:
+            status_str = "UNKNOWN"
+        
+        status = normalize_status(status_str)
+        
+        # Parse progress data
+        progress = None
+        eta_seconds = None
+        
+        progress_data = data.get("progress")
+        if progress_data and isinstance(progress_data, dict):
+            completion = progress_data.get("completion")
+            if completion is not None:
+                # OctoPrint uses 0-100 percentage
+                progress = clamp(completion / 100.0, 0.0, 1.0)
+            
+            time_left = progress_data.get("printTimeLeft")
+            eta_seconds = int(time_left) if time_left is not None else None
+        
+        # Parse job data
+        job_name = None
+        job_data = data.get("job")
+        if job_data and isinstance(job_data, dict):
+            file_info = job_data.get("file", {})
+            if isinstance(file_info, dict):
+                job_name = file_info.get("name")
+        
+        # Parse temperature data (if present from /api/printer)
+        nozzle_temp = None
+        bed_temp = None
+        temp_data = data.get("temperature")
+        if temp_data and isinstance(temp_data, dict):
+            tool_data = temp_data.get("tool0", {})
+            bed_data = temp_data.get("bed", {})
+            
+            if isinstance(tool_data, dict):
+                nozzle_temp = tool_data.get("actual")
+            if isinstance(bed_data, dict):
+                bed_temp = bed_data.get("actual")
+        
+        return PrinterState(
+            status=status,
+            progress=progress,
+            eta_seconds=eta_seconds,
+            job_name=job_name,
+            nozzle_temp=nozzle_temp,
+            bed_temp=bed_temp,
+            last_ok_timestamp=datetime.now()
+        )
     
-    raise NotImplementedError("OctoPrint parsing not yet implemented")
+    except Exception as e:
+        logger.error(f"Error parsing OctoPrint state: {e}", exc_info=True)
+        return PrinterState(
+            status=PrinterStatus.OFFLINE,
+            error_message=f"Parse error: {str(e)}",
+            message="Failed to parse OctoPrint response",
+            last_ok_timestamp=datetime.now()
+        )
 
 
 # ============================================================================
@@ -647,15 +719,19 @@ class OctoPrintAdapter(HttpJsonAdapter):
     """
     OctoPrint API adapter.
     
-    TODO: Implement based on OctoPrint REST API.
-    May require combining multiple endpoints (/api/printer + /api/job).
+    Uses /api/job endpoint which provides:
+    - Current state (Printing/Paused/Operational/Offline/Error)
+    - Job progress and time estimates
+    - File name
+    
+    Requires X-Api-Key authentication.
     """
     
     @property
     def endpoint(self) -> str:
-        # TODO: OctoPrint requires multiple endpoints
-        # This is simplified; real implementation may need multiple requests
-        return "/api/printer"
+        """OctoPrint job endpoint."""
+        return "/api/job"
     
     def parse_response(self, data: Dict[str, Any]) -> PrinterState:
+        """Parse OctoPrint /api/job response."""
         return parse_octoprint_state(data)
