@@ -98,6 +98,11 @@ class AppConfig:
     auth_mode: str = "none"  # "none", "digest", "apikey"
     # Note: password/API key stored securely in keyring, NOT in config
     
+    # PrusaConnect specific settings
+    bearer_token: Optional[str] = None  # Bearer token for PrusaConnect authentication
+    printer_id: Optional[str] = None  # Printer ID for PrusaConnect
+    status_path: Optional[str] = None  # Custom endpoint path (defaults to /api/v1/status)
+    
     @property
     def polling_interval_seconds(self) -> float:
         """Backward compatibility property."""

@@ -140,33 +140,129 @@ def parse_demo_state(
 
 
 # ============================================================================
-# PRUSA CONNECT PARSING (TODO: Implement when API docs available)
+# PRUSA CONNECT PARSING
 # ============================================================================
 
 def parse_prusa_connect_state(data: Dict[str, Any]) -> PrinterState:
     """
     Parse Prusa Connect API response.
     
-    TODO: Implement based on actual Prusa Connect API format.
-    See: https://connect.prusa3d.com/docs
+    This parser is designed to be flexible since the PrusaConnect API
+    may evolve. It extracts common fields and logs unknown fields at debug level.
+    
+    Expected structure (based on typical REST API patterns):
+    {
+      "state": "PRINTING" | "IDLE" | "PAUSED" | "ERROR",
+      "progress": 45.5,  // 0-100 percentage
+      "time_remaining": 1800,  // seconds
+      "temp_nozzle": 215.0,
+      "temp_bed": 60.0,
+      "file_name": "model.gcode"
+    }
+    
+    Or nested format:
+    {
+      "printer": {"state": "PRINTING", "temp_nozzle": 215, "temp_bed": 60},
+      "job": {"progress": 45.5, "time_remaining": 1800, "file_name": "model.gcode"}
+    }
     
     Args:
         data: Parsed JSON from Prusa Connect API.
     
     Returns:
         PrinterState.
-    
-    Raises:
-        KeyError, ValueError: If required fields missing or invalid.
     """
-    # TODO: Replace with actual Prusa Connect format
-    # Expected structure (example):
-    # {
-    #   "printer": {"state": "PRINTING", "temp_nozzle": 215, "temp_bed": 60},
-    #   "job": {"progress": 0.45, "time_remaining": 1800, "file_name": "model.gcode"}
-    # }
+    try:
+        # Try to extract state from various possible locations
+        status_str = None
+        if "state" in data:
+            status_str = data.get("state")
+        elif "printer" in data:
+            printer = data.get("printer", {})
+            status_str = printer.get("state") or printer.get("status")
+        elif "status" in data:
+            status_str = data.get("status")
+        
+        status = normalize_status(status_str) if status_str else PrinterStatus.UNKNOWN
+        
+        # Try to extract progress from various locations
+        progress = None
+        progress_value = data.get("progress")
+        if progress_value is None and "job" in data:
+            job_data = data.get("job", {})
+            if isinstance(job_data, dict):
+                progress_value = job_data.get("progress") or job_data.get("completion")
+        
+        if progress_value is not None:
+            # Normalize to 0-1 range (handle both 0-1 and 0-100 formats)
+            if progress_value <= 1.0:
+                progress = clamp(progress_value, 0.0, 1.0)
+            else:
+                progress = clamp(progress_value / 100.0, 0.0, 1.0)
+        
+        # Try to extract time remaining
+        eta_seconds = None
+        time_remaining = data.get("time_remaining")
+        if time_remaining is None and "job" in data:
+            job_data = data.get("job", {})
+            if isinstance(job_data, dict):
+                time_remaining = job_data.get("time_remaining") or job_data.get("printTimeLeft")
+        
+        if time_remaining is not None:
+            eta_seconds = int(time_remaining)
+        
+        # Try to extract temperatures
+        nozzle_temp = data.get("temp_nozzle") or data.get("nozzle_temp")
+        bed_temp = data.get("temp_bed") or data.get("bed_temp")
+        
+        if nozzle_temp is None and "printer" in data:
+            printer = data.get("printer", {})
+            if isinstance(printer, dict):
+                nozzle_temp = printer.get("temp_nozzle") or printer.get("nozzle_temp")
+                bed_temp = printer.get("temp_bed") or printer.get("bed_temp")
+        
+        if nozzle_temp is None and "temperature" in data:
+            temp_data = data.get("temperature", {})
+            if isinstance(temp_data, dict):
+                nozzle_temp = temp_data.get("nozzle") or temp_data.get("tool0", {}).get("actual")
+                bed_temp = temp_data.get("bed", {}).get("actual") if isinstance(temp_data.get("bed"), dict) else temp_data.get("bed")
+        
+        # Try to extract file name
+        job_name = data.get("file_name") or data.get("filename")
+        if job_name is None and "job" in data:
+            job_data = data.get("job", {})
+            if isinstance(job_data, dict):
+                job_name = job_data.get("file_name") or job_data.get("filename")
+                if job_name is None and "file" in job_data:
+                    file_info = job_data.get("file", {})
+                    if isinstance(file_info, dict):
+                        job_name = file_info.get("name")
+        
+        # Log unknown fields at debug level
+        known_fields = {"state", "status", "progress", "time_remaining", "temp_nozzle", 
+                       "temp_bed", "nozzle_temp", "bed_temp", "file_name", "filename",
+                       "printer", "job", "temperature"}
+        unknown_fields = set(data.keys()) - known_fields
+        if unknown_fields:
+            logger.debug(f"PrusaConnect response contains unknown fields: {unknown_fields}")
+        
+        return PrinterState(
+            status=status,
+            progress=progress,
+            eta_seconds=eta_seconds,
+            job_name=job_name,
+            nozzle_temp=nozzle_temp,
+            bed_temp=bed_temp,
+            last_ok_timestamp=datetime.now()
+        )
     
-    raise NotImplementedError("Prusa Connect parsing not yet implemented")
+    except Exception as e:
+        logger.error(f"Error parsing PrusaConnect state: {e}", exc_info=True)
+        return PrinterState(
+            status=PrinterStatus.ERROR,
+            error_message=f"Parse error: {str(e)}",
+            last_ok_timestamp=datetime.now()
+        )
 
 
 # ============================================================================
@@ -598,14 +694,43 @@ class PrusaConnectAdapter(HttpJsonAdapter):
     """
     Prusa Connect cloud API adapter.
     
-    TODO: Implement when Prusa Connect API access is available.
-    Requires API key authentication.
+    Authenticates using a bearer token (user must provide via config).
+    
+    Configuration requirements:
+    - bearer_token: Authentication token from Prusa Connect account
+    - printer_id: Unique printer identifier
+    - status_path: Optional custom endpoint path (defaults to /api/v1/status)
+    
+    No automatic login is performed - user must generate and provide token manually.
     """
+    
+    def __init__(self, base_url: str, config: Optional[AppConfig] = None, parent: Optional[QObject] = None):
+        """Initialize PrusaConnect adapter with bearer token auth."""
+        super().__init__(base_url, config, parent)
+        
+        # Validate required config
+        if not config:
+            raise ValueError("PrusaConnect requires configuration with bearer_token and printer_id")
+        if not config.bearer_token:
+            raise ValueError("PrusaConnect requires bearer_token in configuration")
+        if not config.printer_id:
+            raise ValueError("PrusaConnect requires printer_id in configuration")
     
     @property
     def endpoint(self) -> str:
-        # TODO: Determine actual Prusa Connect endpoint
+        """Return configurable status endpoint."""
+        if self.config and self.config.status_path:
+            return self.config.status_path
         return "/api/v1/status"
+    
+    def _prepare_request(self, request: QNetworkRequest) -> None:
+        """Add bearer token authentication header."""
+        if self.config and self.config.bearer_token:
+            auth_header = f"Bearer {self.config.bearer_token}"
+            request.setRawHeader(b"Authorization", auth_header.encode())
+        
+        # Add JSON accept header
+        request.setRawHeader(b"Accept", b"application/json")
     
     def parse_response(self, data: Dict[str, Any]) -> PrinterState:
         return parse_prusa_connect_state(data)

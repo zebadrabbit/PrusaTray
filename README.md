@@ -172,6 +172,64 @@ Configuration is stored in `%LOCALAPPDATA%\PrusaTray\config.json`:
 
 **Note:** Passwords/API keys are stored securely in Windows Credential Manager, NOT in config file.
 
+### Backend-Specific Configuration
+
+#### PrusaConnect Backend
+
+For **PrusaConnect** cloud monitoring, you need a bearer token from your Prusa account:
+
+```json
+{
+  "backend": "prusaconnect",
+  "printer_base_url": "https://connect.prusa3d.com",
+  "bearer_token": "your_bearer_token_here",
+  "printer_id": "your_printer_id",
+  "status_path": "/api/v1/status"
+}
+```
+
+- **bearer_token** (required): Bearer token from Prusa Connect account
+- **printer_id** (required): Your printer's unique identifier
+- **status_path** (optional): Custom API endpoint path (defaults to `/api/v1/status`)
+
+**How to get your bearer token:**
+1. Log in to [connect.prusa3d.com](https://connect.prusa3d.com)
+2. Navigate to account settings or API settings
+3. Generate an API token/bearer token
+4. Copy and paste into `bearer_token` field
+
+> **Note:** PrusaConnect uses bearer token authentication instead of username/password. The `auth_mode` setting is ignored for PrusaConnect.
+
+#### PrusaLink Backend
+
+For **PrusaLink** (local printer API):
+
+```json
+{
+  "backend": "prusalink",
+  "printer_base_url": "http://192.168.1.100",
+  "username": "maker",
+  "auth_mode": "digest"
+}
+```
+
+Supports digest authentication with automatic endpoint fallback (`/api/v1/status` → `/api/job`).
+
+#### OctoPrint Backend
+
+For **OctoPrint**:
+
+```json
+{
+  "backend": "octoprint",
+  "printer_base_url": "http://192.168.1.200",
+  "username": "your_api_key_name",
+  "auth_mode": "apikey"
+}
+```
+
+Uses API key authentication via `X-Api-Key` header.
+
 ### Backend Swapping
 
 **Changing backends is literally one config change:**
