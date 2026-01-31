@@ -173,25 +173,22 @@ def parse_prusa_connect_state(data: Dict[str, Any]) -> PrinterState:
 
 def parse_prusalink_state(data: Dict[str, Any]) -> PrinterState:
     """
-    Parse PrusaLink API response.
+    Parse PrusaLink API response (v1 or legacy format).
     
-    PrusaLink API endpoint: /api/v1/status
-    Example response format:
+    Supports two API formats:
+    
+    1. PrusaLink API v1 (/api/v1/status):
     {
-      "printer": {
-        "state": "PRINTING",
-        "temp_nozzle": 215.0,
-        "temp_bed": 60.0
-      },
-      "job": {
-        "id": 123,
-        "progress": 45.5,
-        "time_remaining": 1800,
-        "time_printing": 900,
-        "file": {
-          "name": "model.gcode"
-        }
-      }
+      "printer": {"state": "PRINTING", "temp_nozzle": 215.0, "temp_bed": 60.0},
+      "job": {"progress": 45.5, "time_remaining": 1800, "file": {"name": "model.gcode"}}
+    }
+    
+    2. Legacy format (/api/job):
+    {
+      "state": "Printing",
+      "job": {"file": {"name": "model.gcode"}},
+      "progress": {"completion": 0.88, "printTimeLeft": 960},
+      "temperature": {"tool0": {"actual": 215}, "bed": {"actual": 60}}
     }
     
     Args:
@@ -199,44 +196,97 @@ def parse_prusalink_state(data: Dict[str, Any]) -> PrinterState:
     
     Returns:
         PrinterState.
-    
-    Raises:
-        KeyError, ValueError: If required fields missing or invalid.
     """
-    # Extract printer info
-    printer = data.get("printer", {})
-    job = data.get("job", {})
+    try:
+        # Detect format by checking for "printer" key (v1) or "state" at root (legacy)
+        if "printer" in data:
+            # V1 format
+            printer = data.get("printer", {})
+            job = data.get("job")
+            
+            # Parse status
+            status_str = printer.get("state", "UNKNOWN")
+            status = normalize_status(status_str)
+            
+            # Parse temperatures
+            nozzle_temp = printer.get("temp_nozzle")
+            bed_temp = printer.get("temp_bed")
+            
+            # Parse job info (job may be null if no print)
+            progress = None
+            eta_seconds = None
+            job_name = None
+            
+            if job:
+                progress_percent = job.get("progress")
+                if progress_percent is not None:
+                    # V1 uses 0-100 percentage
+                    progress = clamp(progress_percent / 100.0, 0.0, 1.0)
+                
+                time_remaining = job.get("time_remaining")
+                eta_seconds = int(time_remaining) if time_remaining is not None else None
+                
+                file_info = job.get("file", {})
+                job_name = file_info.get("name") if isinstance(file_info, dict) else None
+            
+        else:
+            # Legacy format
+            status_str = data.get("state", "UNKNOWN")
+            status = normalize_status(status_str)
+            
+            # Parse temperatures
+            temp_data = data.get("temperature", {})
+            tool_temp = temp_data.get("tool0", {}) if temp_data else {}
+            bed_temp_data = temp_data.get("bed", {}) if temp_data else {}
+            
+            nozzle_temp = tool_temp.get("actual") if isinstance(tool_temp, dict) else None
+            bed_temp = bed_temp_data.get("actual") if isinstance(bed_temp_data, dict) else None
+            
+            # Parse job info
+            progress = None
+            eta_seconds = None
+            job_name = None
+            
+            job = data.get("job")
+            progress_data = data.get("progress")
+            
+            if progress_data:
+                completion = progress_data.get("completion")
+                if completion is not None:
+                    # Legacy format may use 0-1 OR 0-100, normalize both
+                    if completion <= 1.0:
+                        progress = clamp(completion, 0.0, 1.0)
+                    else:
+                        progress = clamp(completion / 100.0, 0.0, 1.0)
+                
+                time_left = progress_data.get("printTimeLeft")
+                eta_seconds = int(time_left) if time_left is not None else None
+            
+            if job and isinstance(job, dict):
+                file_info = job.get("file", {})
+                job_name = file_info.get("name") if isinstance(file_info, dict) else None
+            
+            # Handle edge case: Operational with null job/progress = idle
+            if status == PrinterStatus.IDLE and not job and not progress_data:
+                progress = None
+        
+        return PrinterState(
+            status=status,
+            progress=progress,
+            eta_seconds=eta_seconds,
+            job_name=job_name,
+            nozzle_temp=nozzle_temp,
+            bed_temp=bed_temp,
+            last_ok_timestamp=datetime.now()
+        )
     
-    # Parse status
-    status_str = printer.get("state", "UNKNOWN")
-    status = normalize_status(status_str)
-    
-    # Parse temperatures
-    nozzle_temp = printer.get("temp_nozzle")
-    bed_temp = printer.get("temp_bed")
-    
-    # Parse job info
-    progress_percent = job.get("progress")
-    if progress_percent is not None:
-        progress = clamp(progress_percent / 100.0, 0.0, 1.0)
-    else:
-        progress = None
-    
-    time_remaining = job.get("time_remaining")
-    eta_seconds = int(time_remaining) if time_remaining is not None else None
-    
-    file_info = job.get("file", {})
-    job_name = file_info.get("name") if file_info else None
-    
-    return PrinterState(
-        status=status,
-        progress=progress,
-        eta_seconds=eta_seconds,
-        job_name=job_name,
-        nozzle_temp=nozzle_temp,
-        bed_temp=bed_temp,
-        last_ok_timestamp=datetime.now()
-    )
+    except Exception as e:
+        logger.error(f"Error parsing PrusaLink state: {e}", exc_info=True)
+        return PrinterState(
+            status=PrinterStatus.ERROR,
+            error_message=f"Parse error: {str(e)}",
+            last_ok_timestamp=datetime.now()
+        )
 
 
 # ============================================================================
@@ -491,18 +541,106 @@ class PrusaConnectAdapter(HttpJsonAdapter):
 
 class PrusaLinkAdapter(HttpJsonAdapter):
     """
-    PrusaLink local API adapter.
+    PrusaLink local API adapter with dual-endpoint support.
     
-    PrusaLink API documentation: https://github.com/prusa3d/Prusa-Link-Web/wiki/API-documentation
-    Endpoint: /api/v1/status
+    Supports both:
+    - PrusaLink API v1: /api/v1/status (primary)
+    - Legacy format: /api/job (fallback)
+    
+    Auto-detects which endpoint is available and uses it.
     """
+    
+    def __init__(self, base_url: str, config: Optional[AppConfig] = None, parent: Optional[QObject] = None):
+        """Initialize PrusaLink adapter."""
+        super().__init__(base_url, config, parent)
+        self._use_legacy = False  # Track which endpoint works
+        self._tried_v1 = False
     
     @property
     def endpoint(self) -> str:
-        return "/api/v1/status"
+        """Return current endpoint (v1 or legacy)."""
+        return "/api/job" if self._use_legacy else "/api/v1/status"
     
     def parse_response(self, data: Dict[str, Any]) -> PrinterState:
+        """Parse PrusaLink response (auto-detects format)."""
         return parse_prusalink_state(data)
+    
+    def fetch_state_async(self) -> None:
+        """
+        Fetch state with automatic endpoint fallback.
+        
+        Tries /api/v1/status first, falls back to /api/job if needed.
+        """
+        # If we already know which endpoint works, use it
+        if self._use_legacy or self._tried_v1:
+            super().fetch_state_async()
+            return
+        
+        # First time: try v1 endpoint
+        url = QUrl(f"{self.base_url}/api/v1/status")
+        request = QNetworkRequest(url)
+        request.setTransferTimeout(10000)
+        request.setRawHeader(b"Accept", b"application/json")
+        
+        # Add authentication headers
+        if self.config:
+            auth_headers = build_auth_headers(self.config)
+            for header_name, header_value in auth_headers.items():
+                request.setRawHeader(header_name, header_value)
+        
+        logger.debug(f"Trying v1 endpoint: {url.toString()}")
+        
+        reply = self._network_manager.get(request)
+        reply.finished.connect(lambda: self._handle_v1_reply(reply))
+    
+    def _handle_v1_reply(self, reply: QNetworkReply) -> None:
+        """Handle v1 endpoint reply with fallback logic."""
+        try:
+            error = reply.error()
+            http_status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+            self._last_http_status = http_status
+            
+            if error == QNetworkReply.NetworkError.NoError:
+                # V1 endpoint works!
+                data = reply.readAll().data()
+                import json
+                parsed = json.loads(data.decode('utf-8'))
+                state = self.parse_response(parsed)
+                state.last_ok_timestamp = datetime.now()
+                self._tried_v1 = True
+                self.state_fetched.emit(state)
+            elif http_status == 404:
+                # V1 not available, try legacy
+                logger.info("V1 endpoint not found, trying legacy /api/job")
+                self._use_legacy = True
+                self._tried_v1 = True
+                super().fetch_state_async()
+            elif http_status == 401 or http_status == 403:
+                # Authentication failure
+                error_msg = f"Authentication failed (HTTP {http_status})"
+                logger.error(error_msg)
+                error_state = PrinterState(
+                    status=PrinterStatus.ERROR,
+                    error_message="Auth failed - check credentials",
+                    message=error_msg
+                )
+                self._tried_v1 = True
+                self.state_fetched.emit(error_state)
+            else:
+                # Other error, try legacy as fallback
+                error_string = reply.errorString()
+                logger.warning(f"V1 endpoint error: {error_string}, trying legacy")
+                self._use_legacy = True
+                self._tried_v1 = True
+                super().fetch_state_async()
+        except Exception as e:
+            logger.error(f"Error handling v1 reply: {e}", exc_info=True)
+            # Try legacy on parse errors too
+            self._use_legacy = True
+            self._tried_v1 = True
+            super().fetch_state_async()
+        finally:
+            reply.deleteLater()
 
 
 class OctoPrintAdapter(HttpJsonAdapter):
