@@ -4,7 +4,7 @@ Windows system tray application for monitoring Prusa printers via PrusaLink and 
 
 ## Preview
 
-![PrusaTray Preview](docs/tray_preview.png)
+<img width="178" height="179" alt="screenshot" src="https://github.com/user-attachments/assets/b22cd316-75f1-4005-95ea-82b692401a2d" />
 
 *System tray icon with progress ring indicator and detailed tooltip showing printer status, print progress, and estimated time remaining.*
 
