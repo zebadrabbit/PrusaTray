@@ -169,8 +169,14 @@ Configuration is stored in `%LOCALAPPDATA%\PrusaTray\config.json`:
 - **icon_style**: Icon visualization style - `"ring"` or `"bar"`
 - **username**: Username for authentication (optional)
 - **auth_mode**: Authentication mode - `"none"`, `"digest"`, or `"apikey"` (default: `"none"`)
+- **password_key**: Reference key for credential in keyring (e.g., `"prusalink:mk4-office"`) - **recommended**
 
-**Note:** Passwords/API keys are stored securely in Windows Credential Manager, NOT in config file.
+**Security:** Passwords/API keys are stored securely in Windows Credential Manager via python-keyring, **NOT** in config file.
+
+**Credential Management:**
+- On first startup, if `password_key` is configured but credential is missing, you'll be prompted once
+- Credentials can also be provided via environment variables (e.g., for headless deployments)
+- See [CREDENTIAL_STORAGE.md](CREDENTIAL_STORAGE.md) for detailed documentation
 
 ### Backend-Specific Configuration
 

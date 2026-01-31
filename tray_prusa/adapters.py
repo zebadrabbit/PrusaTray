@@ -73,6 +73,10 @@ def build_auth_headers(config: AppConfig) -> Dict[bytes, bytes]:
     """
     Build authentication headers based on config.
     
+    Supports two credential lookup methods:
+    1. Legacy: username + printer_base_url (stored as "url:username" in keyring)
+    2. New: password_key reference (e.g., "prusalink:mk4-office")
+    
     Args:
         config: Application configuration.
         
@@ -81,27 +85,49 @@ def build_auth_headers(config: AppConfig) -> Dict[bytes, bytes]:
     """
     headers = {}
     
-    if config.auth_mode == "apikey" and config.username and config.printer_base_url:
+    if config.auth_mode == "apikey":
         # API key mode: retrieve key from keyring and add X-Api-Key header
-        api_key = keyring_util.get_password(config.printer_base_url, config.username)
+        api_key = None
+        
+        # Try password_key first (new method)
+        if config.password_key:
+            api_key = keyring_util.get_secret(config.password_key)
+            if not api_key:
+                logger.warning(f"API key not found for password_key '{config.password_key}'")
+        
+        # Fallback to legacy method (url:username)
+        elif config.username and config.printer_base_url:
+            api_key = keyring_util.get_password(config.printer_base_url, config.username)
+            if not api_key:
+                logger.warning("API key not found in keyring (legacy lookup)")
+        
         if api_key:
             headers[b"X-Api-Key"] = api_key.encode('utf-8')
             logger.debug("Added X-Api-Key header for API key auth")
-        else:
-            logger.warning("API key not found in keyring")
     
-    elif config.auth_mode == "digest" and config.username and config.printer_base_url:
+    elif config.auth_mode == "digest":
         # Digest auth: retrieve password and add Basic auth header as fallback
         # Note: Full digest auth requires challenge/response, so we use Basic for initial request
-        password = keyring_util.get_password(config.printer_base_url, config.username)
+        password = None
+        
+        # Try password_key first (new method)
+        if config.password_key:
+            password = keyring_util.get_secret(config.password_key)
+            if not password:
+                logger.warning(f"Password not found for password_key '{config.password_key}'")
+        
+        # Fallback to legacy method (url:username)
+        elif config.username and config.printer_base_url:
+            password = keyring_util.get_password(config.printer_base_url, config.username)
+            if not password:
+                logger.warning("Password not found in keyring (legacy lookup)")
+        
         if password:
             import base64
             credentials = f"{config.username}:{password}"
             b64_credentials = base64.b64encode(credentials.encode('utf-8')).decode('ascii')
             headers[b"Authorization"] = f"Basic {b64_credentials}".encode('utf-8')
             logger.debug("Added Basic Authorization header for digest auth")
-        else:
-            logger.warning("Password not found in keyring")
     
     return headers
 

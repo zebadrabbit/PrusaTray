@@ -96,7 +96,8 @@ class AppConfig:
     # Authentication settings
     username: Optional[str] = None  # Username for digest auth or API key name
     auth_mode: str = "none"  # "none", "digest", "apikey"
-    # Note: password/API key stored securely in keyring, NOT in config
+    password_key: Optional[str] = None  # Reference key for password in keyring (e.g., "prusalink:mk4-office")
+    # Note: password/API key stored securely in keyring or env var, NOT in config
     
     # PrusaConnect specific settings
     bearer_token: Optional[str] = None  # Bearer token for PrusaConnect authentication

@@ -12,8 +12,44 @@ from tray_prusa.tray import PrusaTrayIcon
 from tray_prusa.poller import PrinterPoller
 from tray_prusa.adapter_factory import create_adapter, validate_config
 from tray_prusa.models import AppConfig
+from tray_prusa import keyring_util
 
 logger = logging.getLogger(__name__)
+
+
+def check_and_prompt_for_credentials(config: AppConfig) -> None:
+    """
+    Check if credentials are required and prompt user if missing.
+    
+    If password_key is configured but no credential exists in keyring or env var,
+    prompts the user once and stores the credential in keyring.
+    
+    Args:
+        config: Application configuration.
+    """
+    # Only prompt if auth is enabled and password_key is configured
+    if config.auth_mode in ("digest", "apikey") and config.password_key:
+        # Check if credential exists
+        credential = keyring_util.get_secret(config.password_key)
+        
+        if credential is None:
+            logger.info(f"Credential not found for '{config.password_key}' - prompting user")
+            
+            # Prompt user for credential
+            credential = keyring_util.prompt_for_credential(config.password_key)
+            
+            if credential:
+                # Store in keyring
+                if keyring_util.set_secret(config.password_key, credential):
+                    logger.info(f"Stored credential for '{config.password_key}'")
+                else:
+                    logger.warning(f"Failed to store credential for '{config.password_key}'")
+                    env_var = f"PRUSATRAY_PASSWORD_{keyring_util._sanitize_key_for_env(config.password_key)}"
+                    logger.info(f"You can set environment variable: {env_var}")
+            else:
+                logger.warning(f"No credential provided for '{config.password_key}'")
+                env_var = f"PRUSATRAY_PASSWORD_{keyring_util._sanitize_key_for_env(config.password_key)}"
+                logger.info(f"Authentication may fail. Set environment variable: {env_var}")
 
 
 class PrusaTrayApp:
@@ -39,6 +75,9 @@ class PrusaTrayApp:
             validate_config(config)
         except ValueError as e:
             logger.warning(f"Config validation warning: {e}")
+        
+        # Check for required credentials and prompt if missing
+        check_and_prompt_for_credentials(config)
         
         # Create adapter based on config
         adapter = create_adapter(config)
