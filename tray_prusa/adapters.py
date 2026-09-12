@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import Protocol, Dict, Any, Optional
 
-from PySide6.QtCore import QObject, Signal, QUrl
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from .models import PrinterState, PrinterStatus, AppConfig
@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 def normalize_status(status_str: Optional[str]) -> PrinterStatus:
     """
-    Normalize various status strings to PrinterStatus enum.
+    Normalize a backend status string to PrinterStatus.
+
+    Covers the PrusaLink API v1 printer states (IDLE, BUSY, PRINTING, PAUSED,
+    FINISHED, STOPPED, ERROR, ATTENTION, READY), the extra Prusa Connect states
+    (MANIPULATING, OFFLINE, UNKNOWN) and the legacy OctoPrint-style strings.
 
     Args:
         status_str: Raw status string from API.
@@ -36,21 +40,28 @@ def normalize_status(status_str: Optional[str]) -> PrinterStatus:
     if not status_str:
         return PrinterStatus.UNKNOWN
 
-    status_upper = status_str.upper()
-
-    # Map common status strings to our enum
-    if status_upper in ("IDLE", "READY", "OPERATIONAL"):
-        return PrinterStatus.IDLE
-    elif status_upper in ("PRINTING", "BUSY", "WORKING"):
-        return PrinterStatus.PRINTING
-    elif status_upper in ("PAUSED", "PAUSING"):
-        return PrinterStatus.PAUSED
-    elif status_upper in ("ERROR", "STOPPED", "FAILED"):
-        return PrinterStatus.ERROR
-    elif status_upper == "OFFLINE":
-        return PrinterStatus.OFFLINE
-    else:
-        return PrinterStatus.UNKNOWN
+    # FINISHED/STOPPED mean "the job ended, printer is sitting there" - not an
+    # error, and mapping them to IDLE is what makes the print-complete
+    # notification fire on the PRINTING -> FINISHED transition.
+    # BUSY/MANIPULATING mean the printer is doing something that is not a print.
+    return {
+        "IDLE": PrinterStatus.IDLE,
+        "READY": PrinterStatus.IDLE,
+        "OPERATIONAL": PrinterStatus.IDLE,
+        "FINISHED": PrinterStatus.IDLE,
+        "STOPPED": PrinterStatus.IDLE,
+        "CANCELLED": PrinterStatus.IDLE,
+        "BUSY": PrinterStatus.IDLE,
+        "MANIPULATING": PrinterStatus.IDLE,
+        "PRINTING": PrinterStatus.PRINTING,
+        "WORKING": PrinterStatus.PRINTING,
+        "PAUSED": PrinterStatus.PAUSED,
+        "PAUSING": PrinterStatus.PAUSED,
+        "ATTENTION": PrinterStatus.ATTENTION,
+        "ERROR": PrinterStatus.ERROR,
+        "FAILED": PrinterStatus.ERROR,
+        "OFFLINE": PrinterStatus.OFFLINE,
+    }.get(status_str.upper(), PrinterStatus.UNKNOWN)
 
 
 def clamp(
@@ -72,13 +83,88 @@ def clamp(
     return max(min_val, min(max_val, value))
 
 
+def normalize_progress(value: Optional[float]) -> Optional[float]:
+    """
+    Normalize a progress value to 0.0-1.0.
+
+    Prusa APIs report percent (0-100); a few legacy payloads report a fraction.
+    Values <= 1.0 are treated as a fraction, everything else as percent.
+
+    Args:
+        value: Raw progress value, or None.
+
+    Returns:
+        Progress as 0.0-1.0, or None.
+    """
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return clamp(value if value <= 1.0 else value / 100.0, 0.0, 1.0)
+
+
+def positive_seconds(value: Optional[Any]) -> Optional[int]:
+    """
+    Coerce a remaining-time field to a non-negative int.
+
+    PrusaLink reports -1 (and Connect reports null) while the estimate is not
+    ready yet; both must not be shown as an ETA.
+
+    Args:
+        value: Raw seconds value.
+
+    Returns:
+        Seconds as int, or None if missing/negative/unparseable.
+    """
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def get_credential(config: AppConfig) -> Optional[str]:
+    """
+    Look up the configured password / API key.
+
+    Two lookup methods, in order:
+    1. password_key reference (e.g. "prusalink:mk4-office")
+    2. Legacy: username + printer_base_url (stored as "url:username")
+
+    Args:
+        config: Application configuration.
+
+    Returns:
+        The secret, or None if not configured/found.
+    """
+    if config.password_key:
+        secret = keyring_util.get_secret(config.password_key)
+        if secret:
+            return secret
+        logger.warning(f"No credential stored for '{config.password_key}'")
+
+    # Fall through to the legacy lookup: credentials saved from the settings
+    # dialog live under url:username, with no password_key in the config file.
+    if config.username and config.printer_base_url:
+        secret = keyring_util.get_password(config.printer_base_url, config.username)
+        if secret:
+            return secret
+        logger.warning("No credential in keyring (legacy url:username lookup)")
+
+    return None
+
+
 def build_auth_headers(config: AppConfig) -> Dict[bytes, bytes]:
     """
-    Build authentication headers based on config.
+    Build authentication headers for a PrusaLink/OctoPrint request.
 
-    Supports two credential lookup methods:
-    1. Legacy: username + printer_base_url (stored as "url:username" in keyring)
-    2. New: password_key reference (e.g., "prusalink:mk4-office")
+    PrusaLink on Buddy firmware (MK4/XL/MINI) guards the whole /api tree and
+    accepts the PrusaLink password as X-Api-Key, so the header is sent in both
+    "apikey" and "digest" mode. Real Digest challenge/response is handled by Qt
+    via QNetworkAccessManager.authenticationRequired (see HttpJsonAdapter), which
+    is what standalone PrusaLink (MK3) and the PrusaLink web UI use.
 
     Args:
         config: Application configuration.
@@ -86,64 +172,15 @@ def build_auth_headers(config: AppConfig) -> Dict[bytes, bytes]:
     Returns:
         Dictionary of header name -> header value (as bytes).
     """
-    headers = {}
+    if config.auth_mode not in ("apikey", "digest"):
+        return {}
 
-    if config.auth_mode == "apikey":
-        # API key mode: retrieve key from keyring and add X-Api-Key header
-        api_key = None
+    secret = get_credential(config)
+    if not secret:
+        return {}
 
-        # Try password_key first (new method)
-        if config.password_key:
-            api_key = keyring_util.get_secret(config.password_key)
-            if not api_key:
-                logger.warning(
-                    f"API key not found for password_key '{config.password_key}'"
-                )
-
-        # Fallback to legacy method (url:username)
-        elif config.username and config.printer_base_url:
-            api_key = keyring_util.get_password(
-                config.printer_base_url, config.username
-            )
-            if not api_key:
-                logger.warning("API key not found in keyring (legacy lookup)")
-
-        if api_key:
-            headers[b"X-Api-Key"] = api_key.encode("utf-8")
-            logger.debug("Added X-Api-Key header for API key auth")
-
-    elif config.auth_mode == "digest":
-        # Digest auth: retrieve password and add Basic auth header as fallback
-        # Note: Full digest auth requires challenge/response, so we use Basic for initial request
-        password = None
-
-        # Try password_key first (new method)
-        if config.password_key:
-            password = keyring_util.get_secret(config.password_key)
-            if not password:
-                logger.warning(
-                    f"Password not found for password_key '{config.password_key}'"
-                )
-
-        # Fallback to legacy method (url:username)
-        elif config.username and config.printer_base_url:
-            password = keyring_util.get_password(
-                config.printer_base_url, config.username
-            )
-            if not password:
-                logger.warning("Password not found in keyring (legacy lookup)")
-
-        if password:
-            import base64
-
-            credentials = f"{config.username}:{password}"
-            b64_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
-                "ascii"
-            )
-            headers[b"Authorization"] = f"Basic {b64_credentials}".encode("utf-8")
-            logger.debug("Added Basic Authorization header for digest auth")
-
-    return headers
+    logger.debug("Added X-Api-Key header")
+    return {b"X-Api-Key": secret.encode("utf-8")}
 
 
 # ============================================================================
@@ -185,138 +222,63 @@ def parse_demo_state(
 # ============================================================================
 
 
-def parse_prusa_connect_state(data: Dict[str, Any]) -> PrinterState:
+# Job states that mean "there is a print running right now". Everything else
+# in the Job.state enum (FIN_OK, FIN_ERROR, FIN_STOPPED, FIN_HARVESTED, UNKNOWN)
+# is a finished job that Connect still lists as the printer's most recent one.
+CONNECT_ACTIVE_JOB_STATES = ("PRINTING", "PAUSED")
+
+
+def parse_prusa_connect_state(
+    printer: Dict[str, Any], job: Optional[Dict[str, Any]] = None
+) -> PrinterState:
     """
-    Parse Prusa Connect API response.
+    Parse a Prusa Connect response into a PrinterState.
 
-    This parser is designed to be flexible since the PrusaConnect API
-    may evolve. It extracts common fields and logs unknown fields at debug level.
+    Shapes come from the published Connect mobile API OpenAPI spec
+    (https://connect-mobile-api.prusa3d.com/api/docs).
 
-    Expected structure (based on typical REST API patterns):
+    printer - GET /api/v1/printers/{uuid}:
     {
-      "state": "PRINTING" | "IDLE" | "PAUSED" | "ERROR",
-      "progress": 45.5,  // 0-100 percentage
-      "time_remaining": 1800,  // seconds
-      "temp_nozzle": 215.0,
-      "temp_bed": 60.0,
-      "file_name": "model.gcode"
+      "uuid": "...", "name": "MK4 Office", "state": "PRINTING",
+      "telemetry": {"temperatureNozzleCurrent": 214.9, "temperatureNozzleTarget": 215.0,
+                    "temperatureHeatbedCurrent": 59.5, "temperatureHeatbedTarget": 60.0,
+                    "axisZ": 0.5, "speed": 100, "lastOnline": "..."}
     }
 
-    Or nested format:
+    job - first element of GET /api/v1/jobs?printer={uuid}:
     {
-      "printer": {"state": "PRINTING", "temp_nozzle": 215, "temp_bed": 60},
-      "job": {"progress": 45.5, "time_remaining": 1800, "file_name": "model.gcode"}
+      "id": "...", "state": "PRINTING", "progress": 42.0, "fileName": "benchy.gcode",
+      "endAt": 1706749200, "estimatedPrintTime": 7200
     }
 
     Args:
-        data: Parsed JSON from Prusa Connect API.
+        printer: Printer resource from Connect.
+        job: Most recent job for that printer, if any.
 
     Returns:
         PrinterState.
     """
     try:
-        # Try to extract state from various possible locations
-        status_str = None
-        if "state" in data:
-            status_str = data.get("state")
-        elif "printer" in data:
-            printer = data.get("printer", {})
-            status_str = printer.get("state") or printer.get("status")
-        elif "status" in data:
-            status_str = data.get("status")
+        printer = printer or {}
+        telemetry = printer.get("telemetry") or {}
 
-        status = normalize_status(status_str) if status_str else PrinterStatus.UNKNOWN
+        status = normalize_status(printer.get("state"))
 
-        # Try to extract progress from various locations
-        progress = None
-        progress_value = data.get("progress")
-        if progress_value is None and "job" in data:
-            job_data = data.get("job", {})
-            if isinstance(job_data, dict):
-                progress_value = job_data.get("progress") or job_data.get("completion")
-
-        if progress_value is not None:
-            # Normalize to 0-1 range (handle both 0-1 and 0-100 formats)
-            if progress_value <= 1.0:
-                progress = clamp(progress_value, 0.0, 1.0)
-            else:
-                progress = clamp(progress_value / 100.0, 0.0, 1.0)
-
-        # Try to extract time remaining
-        eta_seconds = None
-        time_remaining = data.get("time_remaining")
-        if time_remaining is None and "job" in data:
-            job_data = data.get("job", {})
-            if isinstance(job_data, dict):
-                time_remaining = job_data.get("time_remaining") or job_data.get(
-                    "printTimeLeft"
-                )
-
-        if time_remaining is not None:
-            eta_seconds = int(time_remaining)
-
-        # Try to extract temperatures
-        nozzle_temp = data.get("temp_nozzle") or data.get("nozzle_temp")
-        bed_temp = data.get("temp_bed") or data.get("bed_temp")
-
-        if nozzle_temp is None and "printer" in data:
-            printer = data.get("printer", {})
-            if isinstance(printer, dict):
-                nozzle_temp = printer.get("temp_nozzle") or printer.get("nozzle_temp")
-                bed_temp = printer.get("temp_bed") or printer.get("bed_temp")
-
-        if nozzle_temp is None and "temperature" in data:
-            temp_data = data.get("temperature", {})
-            if isinstance(temp_data, dict):
-                nozzle_temp = temp_data.get("nozzle") or temp_data.get("tool0", {}).get(
-                    "actual"
-                )
-                bed_temp = (
-                    temp_data.get("bed", {}).get("actual")
-                    if isinstance(temp_data.get("bed"), dict)
-                    else temp_data.get("bed")
-                )
-
-        # Try to extract file name
-        job_name = data.get("file_name") or data.get("filename")
-        if job_name is None and "job" in data:
-            job_data = data.get("job", {})
-            if isinstance(job_data, dict):
-                job_name = job_data.get("file_name") or job_data.get("filename")
-                if job_name is None and "file" in job_data:
-                    file_info = job_data.get("file", {})
-                    if isinstance(file_info, dict):
-                        job_name = file_info.get("name")
-
-        # Log unknown fields at debug level
-        known_fields = {
-            "state",
-            "status",
-            "progress",
-            "time_remaining",
-            "temp_nozzle",
-            "temp_bed",
-            "nozzle_temp",
-            "bed_temp",
-            "file_name",
-            "filename",
-            "printer",
-            "job",
-            "temperature",
-        }
-        unknown_fields = set(data.keys()) - known_fields
-        if unknown_fields:
-            logger.debug(
-                f"PrusaConnect response contains unknown fields: {unknown_fields}"
-            )
+        # Only report progress/ETA/file for a job that is actually running -
+        # Connect keeps returning the last finished job forever otherwise.
+        progress = eta_seconds = job_name = None
+        if job and job.get("state") in CONNECT_ACTIVE_JOB_STATES:
+            progress = normalize_progress(job.get("progress"))
+            job_name = job.get("fileName")
+            eta_seconds = _connect_eta(job)
 
         return PrinterState(
             status=status,
             progress=progress,
             eta_seconds=eta_seconds,
             job_name=job_name,
-            nozzle_temp=nozzle_temp,
-            bed_temp=bed_temp,
+            nozzle_temp=telemetry.get("temperatureNozzleCurrent"),
+            bed_temp=telemetry.get("temperatureHeatbedCurrent"),
             last_ok_timestamp=datetime.now(),
         )
 
@@ -329,24 +291,56 @@ def parse_prusa_connect_state(data: Dict[str, Any]) -> PrinterState:
         )
 
 
+def _connect_eta(job: Dict[str, Any]) -> Optional[int]:
+    """
+    Derive remaining seconds from a Connect job.
+
+    Connect reports an absolute finish time (endAt, unix seconds) rather than a
+    countdown, so subtract now. Falls back to estimatedPrintTime scaled by the
+    remaining fraction when endAt is missing.
+
+    Args:
+        job: Job resource from Connect.
+
+    Returns:
+        Seconds remaining, or None.
+    """
+    end_at = positive_seconds(job.get("endAt"))
+    if end_at:
+        return positive_seconds(end_at - time.time())
+
+    estimated = positive_seconds(job.get("estimatedPrintTime"))
+    fraction = normalize_progress(job.get("progress"))
+    if estimated is not None and fraction is not None:
+        return int(estimated * (1.0 - fraction))
+    return None
+
+
 # ============================================================================
 # PRUSALINK PARSING
 # ============================================================================
 
 
-def parse_prusalink_state(data: Dict[str, Any]) -> PrinterState:
+def parse_prusalink_state(
+    data: Dict[str, Any], job_name: Optional[str] = None
+) -> PrinterState:
     """
-    Parse PrusaLink API response (v1 or legacy format).
+    Parse a PrusaLink API response (v1 or legacy format).
 
-    Supports two API formats:
-
-    1. PrusaLink API v1 (/api/v1/status):
+    1. PrusaLink API v1 (GET /api/v1/status), per the published OpenAPI spec:
     {
-      "printer": {"state": "PRINTING", "temp_nozzle": 215.0, "temp_bed": 60.0},
-      "job": {"progress": 45.5, "time_remaining": 1800, "file": {"name": "model.gcode"}}
+      "printer": {"state": "PRINTING", "temp_nozzle": 214.9, "target_nozzle": 215.0,
+                  "temp_bed": 59.5, "target_bed": 60.0, "axis_z": 0.5,
+                  "flow": 95, "speed": 100, "fan_hotend": 0, "fan_print": 0,
+                  "status_printer": {"ok": true, "message": "..."},
+                  "status_connect": {"ok": true, "message": "..."}},
+      "job": {"id": 420, "progress": 42.0, "time_remaining": 520, "time_printing": 526}
     }
+    Note that /api/v1/status carries NO file name - the printing file is only
+    available from GET /api/v1/job, which PrusaLinkAdapter fetches separately and
+    passes in as job_name.
 
-    2. Legacy format (/api/job):
+    2. Legacy format (GET /api/job, PrusaLink 0.7 / OctoPrint-compatible):
     {
       "state": "Printing",
       "job": {"file": {"name": "model.gcode"}},
@@ -355,101 +349,71 @@ def parse_prusalink_state(data: Dict[str, Any]) -> PrinterState:
     }
 
     Args:
-        data: Parsed JSON from PrusaLink API.
+        data: Parsed JSON from the PrusaLink API.
+        job_name: File name from /api/v1/job, if already known (v1 only).
 
     Returns:
         PrinterState.
     """
     try:
-        # Detect format by checking for "printer" key (v1) or "state" at root (legacy)
         if "printer" in data:
-            # V1 format
-            printer = data.get("printer", {})
-            job = data.get("job")
+            # --- API v1 -----------------------------------------------------
+            printer = data.get("printer") or {}
+            job = data.get("job") or {}
 
-            # Parse status
-            status_str = printer.get("state", "UNKNOWN")
-            status = normalize_status(status_str)
+            status = normalize_status(printer.get("state"))
 
-            # Parse temperatures
-            nozzle_temp = printer.get("temp_nozzle")
-            bed_temp = printer.get("temp_bed")
+            # status_printer/status_connect explain ATTENTION and ERROR states.
+            message = None
+            for key in ("status_printer", "status_connect"):
+                info = printer.get(key)
+                if isinstance(info, dict) and not info.get("ok", True):
+                    message = info.get("message") or message
 
-            # Parse job info (job may be null if no print)
-            progress = None
-            eta_seconds = None
-            job_name = None
-
-            if job:
-                progress_percent = job.get("progress")
-                if progress_percent is not None:
-                    # V1 uses 0-100 percentage
-                    progress = clamp(progress_percent / 100.0, 0.0, 1.0)
-
-                time_remaining = job.get("time_remaining")
-                eta_seconds = (
-                    int(time_remaining) if time_remaining is not None else None
-                )
-
-                file_info = job.get("file", {})
-                job_name = (
-                    file_info.get("name") if isinstance(file_info, dict) else None
-                )
-
-        else:
-            # Legacy format
-            status_str = data.get("state", "UNKNOWN")
-            status = normalize_status(status_str)
-
-            # Parse temperatures
-            temp_data = data.get("temperature", {})
-            tool_temp = temp_data.get("tool0", {}) if temp_data else {}
-            bed_temp_data = temp_data.get("bed", {}) if temp_data else {}
-
-            nozzle_temp = (
-                tool_temp.get("actual") if isinstance(tool_temp, dict) else None
-            )
-            bed_temp = (
-                bed_temp_data.get("actual") if isinstance(bed_temp_data, dict) else None
+            return PrinterState(
+                status=status,
+                progress=normalize_progress(job.get("progress")),
+                eta_seconds=positive_seconds(job.get("time_remaining")),
+                job_name=job_name,
+                nozzle_temp=printer.get("temp_nozzle"),
+                bed_temp=printer.get("temp_bed"),
+                message=message,
+                last_ok_timestamp=datetime.now(),
             )
 
-            # Parse job info
-            progress = None
-            eta_seconds = None
-            job_name = None
+        # --- Legacy /api/job ------------------------------------------------
+        status = normalize_status(data.get("state"))
 
-            job = data.get("job")
-            progress_data = data.get("progress")
+        temp_data = data.get("temperature") or {}
+        tool_temp = temp_data.get("tool0") or {}
+        bed_temp_data = temp_data.get("bed") or {}
 
-            if progress_data:
-                completion = progress_data.get("completion")
-                if completion is not None:
-                    # Legacy format may use 0-1 OR 0-100, normalize both
-                    if completion <= 1.0:
-                        progress = clamp(completion, 0.0, 1.0)
-                    else:
-                        progress = clamp(completion / 100.0, 0.0, 1.0)
+        job = data.get("job")
+        progress_data = data.get("progress")
 
-                time_left = progress_data.get("printTimeLeft")
-                eta_seconds = int(time_left) if time_left is not None else None
+        progress = None
+        eta_seconds = None
+        if progress_data:
+            progress = normalize_progress(progress_data.get("completion"))
+            eta_seconds = positive_seconds(progress_data.get("printTimeLeft"))
 
-            if job and isinstance(job, dict):
-                file_info = job.get("file", {})
-                job_name = (
-                    file_info.get("name") if isinstance(file_info, dict) else None
-                )
-
-            # Handle edge case: Operational with null job/progress = idle
-            if status == PrinterStatus.IDLE and not job and not progress_data:
-                progress = None
+        legacy_name = None
+        if isinstance(job, dict):
+            file_info = job.get("file")
+            if isinstance(file_info, dict):
+                legacy_name = file_info.get("display_name") or file_info.get("name")
 
         return PrinterState(
             status=status,
             progress=progress,
             eta_seconds=eta_seconds,
-            job_name=job_name,
-            nozzle_temp=nozzle_temp,
-            bed_temp=bed_temp,
+            job_name=legacy_name,
+            nozzle_temp=(
+                tool_temp.get("actual") if isinstance(tool_temp, dict) else None
+            ),
+            bed_temp=(
+                bed_temp_data.get("actual") if isinstance(bed_temp_data, dict) else None
+            ),
             last_ok_timestamp=datetime.now(),
         )
 
@@ -460,6 +424,23 @@ def parse_prusalink_state(data: Dict[str, Any]) -> PrinterState:
             error_message=f"Parse error: {str(e)}",
             last_ok_timestamp=datetime.now(),
         )
+
+
+def parse_prusalink_job_name(data: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract the printing file name from a GET /api/v1/job response.
+
+    Args:
+        data: Parsed JSON from /api/v1/job.
+
+    Returns:
+        Long file name (falling back to the 8.3 short name), or None for a
+        serial print / no job.
+    """
+    file_info = (data or {}).get("file")
+    if not isinstance(file_info, dict):
+        return None
+    return file_info.get("display_name") or file_info.get("name")
 
 
 # ============================================================================
@@ -676,7 +657,31 @@ class HttpJsonAdapter(QObject):
         self.base_url = base_url.rstrip("/")
         self.config = config
         self._network_manager = QNetworkAccessManager(self)
+        self._network_manager.authenticationRequired.connect(self._authenticate)
         self._last_http_status: Optional[int] = None
+        self._auth_attempted = False
+
+    def _authenticate(self, reply: QNetworkReply, authenticator) -> None:
+        """
+        Answer an HTTP Digest (or Basic) challenge.
+
+        Qt does the challenge/response itself; we only supply the credentials.
+        This is how PrusaLink's documented digestAuth scheme is satisfied.
+        Answering the same challenge twice means the credentials are wrong, so
+        we refuse the second time instead of letting Qt loop.
+        """
+        if self._auth_attempted or not self.config:
+            logger.error("Authentication rejected - check username/password")
+            return
+
+        password = get_credential(self.config)
+        if not password:
+            return
+
+        self._auth_attempted = True
+        authenticator.setUser(self.config.username or "maker")
+        authenticator.setPassword(password)
+        logger.debug("Answered auth challenge for user %s", self.config.username)
 
     @property
     def endpoint(self) -> str:
@@ -707,6 +712,66 @@ class HttpJsonAdapter(QObject):
         """
         raise NotImplementedError("Subclasses must implement parse_response method")
 
+    def _read_json(self, reply: QNetworkReply, required: bool = True) -> Optional[Any]:
+        """
+        Decode a reply body, emitting state_error on failure.
+
+        Args:
+            reply: Finished reply.
+            required: When False, a failed reply yields None without an error
+                signal (the caller can still emit a useful partial state).
+
+        Returns:
+            Parsed JSON, or None if the request failed.
+        """
+        import json
+
+        http_status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        self._last_http_status = http_status
+
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            message = (
+                "Auth failed - check credentials"
+                if http_status in (401, 403)
+                else reply.errorString()
+            )
+            logger.warning(f"{self.base_url} request failed: {message}")
+            if required:
+                self.state_error.emit(message)
+            return None
+
+        try:
+            return json.loads(bytes(reply.readAll()).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            logger.error(f"Invalid JSON from {self.base_url}: {e}")
+            if required:
+                self.state_error.emit(f"Invalid JSON: {e}")
+            return None
+
+    def build_request(self, path: str) -> QNetworkRequest:
+        """
+        Build an authenticated JSON GET request for a path on this backend.
+
+        Args:
+            path: Path (and query) to append to the base URL.
+
+        Returns:
+            Configured QNetworkRequest with a 5s transfer timeout.
+        """
+        url = QUrl(f"{self.base_url}{path}")
+        request = QNetworkRequest(url)
+        request.setTransferTimeout(5000)  # 5s timeout - fail fast for better UX
+        request.setRawHeader(b"Accept", b"application/json")
+
+        if self.config:
+            for name, value in build_auth_headers(self.config).items():
+                request.setRawHeader(name, value)
+
+        # One digest challenge answer per request; a repeat means bad credentials.
+        self._auth_attempted = False
+        logger.debug(f"Fetching {url.toString()}")
+        return request
+
     def fetch_state_async(self) -> None:
         """
         Fetch state asynchronously.
@@ -714,20 +779,7 @@ class HttpJsonAdapter(QObject):
         Emits state_fetched on success or state_error on failure.
         Does NOT block. Uses 5-second timeout for responsiveness.
         """
-        url = QUrl(f"{self.base_url}{self.endpoint}")
-        request = QNetworkRequest(url)
-        request.setTransferTimeout(5000)  # 5s timeout - fail fast for better UX
-        request.setRawHeader(b"Accept", b"application/json")
-
-        # Add authentication headers if configured
-        if self.config:
-            auth_headers = build_auth_headers(self.config)
-            for header_name, header_value in auth_headers.items():
-                request.setRawHeader(header_name, header_value)
-
-        logger.debug(f"Fetching {url.toString()}")
-
-        reply = self._network_manager.get(request)
+        reply = self._network_manager.get(self.build_request(self.endpoint))
         reply.finished.connect(lambda: self._handle_reply(reply))
 
     def _handle_reply(self, reply: QNetworkReply) -> None:
@@ -892,68 +944,17 @@ class HttpJsonAdapter(QObject):
 # ============================================================================
 
 
-class PrusaConnectAdapter(HttpJsonAdapter):
-    """
-    Prusa Connect cloud API adapter.
-
-    Authenticates using a bearer token (user must provide via config).
-
-    Configuration requirements:
-    - bearer_token: Authentication token from Prusa Connect account
-    - printer_id: Unique printer identifier
-    - status_path: Optional custom endpoint path (defaults to /api/v1/status)
-
-    No automatic login is performed - user must generate and provide token manually.
-    """
-
-    def __init__(
-        self,
-        base_url: str,
-        config: Optional[AppConfig] = None,
-        parent: Optional[QObject] = None,
-    ):
-        """Initialize PrusaConnect adapter with bearer token auth."""
-        super().__init__(base_url, config, parent)
-
-        # Validate required config
-        if not config:
-            raise ValueError(
-                "PrusaConnect requires configuration with bearer_token and printer_id"
-            )
-        if not config.bearer_token:
-            raise ValueError("PrusaConnect requires bearer_token in configuration")
-        if not config.printer_id:
-            raise ValueError("PrusaConnect requires printer_id in configuration")
-
-    @property
-    def endpoint(self) -> str:
-        """Return configurable status endpoint."""
-        if self.config and self.config.status_path:
-            return self.config.status_path
-        return "/api/v1/status"
-
-    def _prepare_request(self, request: QNetworkRequest) -> None:
-        """Add bearer token authentication header."""
-        if self.config and self.config.bearer_token:
-            auth_header = f"Bearer {self.config.bearer_token}"
-            request.setRawHeader(b"Authorization", auth_header.encode())
-
-        # Add JSON accept header
-        request.setRawHeader(b"Accept", b"application/json")
-
-    def parse_response(self, data: Dict[str, Any]) -> PrinterState:
-        return parse_prusa_connect_state(data)
-
-
 class PrusaLinkAdapter(HttpJsonAdapter):
     """
-    PrusaLink local API adapter with dual-endpoint support.
+    PrusaLink local API adapter.
 
-    Supports both:
-    - PrusaLink API v1: /api/v1/status (primary)
-    - Legacy format: /api/job (fallback)
+    Primary: PrusaLink API v1 (GET /api/v1/status), the documented API on Buddy
+    firmware (MK4/MK3.9/XL/MINI) and PrusaLink 0.8+. /api/v1/status carries no
+    file name, so the current job's name is fetched once per job from
+    GET /api/v1/job and reused until the job id changes.
 
-    Auto-detects which endpoint is available and uses it.
+    Fallback: the legacy OctoPrint-shaped GET /api/job, for PrusaLink 0.7.x,
+    used automatically if /api/v1/status returns 404.
     """
 
     def __init__(
@@ -964,98 +965,154 @@ class PrusaLinkAdapter(HttpJsonAdapter):
     ):
         """Initialize PrusaLink adapter."""
         super().__init__(base_url, config, parent)
-        self._use_legacy = False  # Track which endpoint works
-        self._tried_v1 = False
+        self._use_legacy = False
+        self._job_id: Optional[Any] = None
+        self._job_name: Optional[str] = None
 
     @property
     def endpoint(self) -> str:
-        """Return current endpoint (v1 or legacy)."""
+        """Status endpoint for the detected API generation."""
         return "/api/job" if self._use_legacy else "/api/v1/status"
 
     def parse_response(self, data: Dict[str, Any]) -> PrinterState:
-        """Parse PrusaLink response (auto-detects format)."""
-        return parse_prusalink_state(data)
+        """Parse a status response, refreshing the cached job name if needed."""
+        if not self._use_legacy:
+            job_id = (data.get("job") or {}).get("id")
+            if job_id != self._job_id:
+                # New job (or job ended): drop the stale name and look it up.
+                self._job_id, self._job_name = job_id, None
+                if job_id is not None:
+                    self._fetch_job_name()
+        return parse_prusalink_state(data, self._job_name)
+
+    def _handle_reply(self, reply: QNetworkReply) -> None:
+        """Handle a status reply, falling back to the legacy endpoint on 404."""
+        http_status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        if http_status == 404 and not self._use_legacy:
+            logger.info("No /api/v1/status on this printer, using legacy /api/job")
+            self._use_legacy = True
+            reply.deleteLater()
+            # Start the retry from the event loop; issuing a request from inside
+            # a finished handler re-enters QNetworkAccessManager and can crash.
+            QTimer.singleShot(0, self.fetch_state_async)
+            return
+        super()._handle_reply(reply)
+
+    def _fetch_job_name(self) -> None:
+        """Fetch the current job's file name from /api/v1/job (fire and forget)."""
+
+        def request():
+            reply = self._network_manager.get(self.build_request("/api/v1/job"))
+            reply.finished.connect(lambda: self._store_job_name(reply))
+
+        # parse_response runs inside a finished handler; defer the extra request.
+        QTimer.singleShot(0, request)
+
+    def _store_job_name(self, reply: QNetworkReply) -> None:
+        """
+        Cache the job name from a /api/v1/job reply.
+
+        The name shows up on the next poll; a failure here (204 No Content when
+        the job just ended, or an offline printer) only means no name is shown.
+        """
+        data = self._read_json(reply, required=False)
+        reply.deleteLater()
+        if isinstance(data, dict):
+            self._job_name = parse_prusalink_job_name(data)
+            logger.debug(f"Job {self._job_id} name: {self._job_name}")
+
+
+class PrusaConnectAdapter(HttpJsonAdapter):
+    """
+    Prusa Connect cloud adapter, using the documented Connect mobile API gateway
+    at https://connect-mobile-api.prusa3d.com (see /api/docs for the OpenAPI spec).
+
+    Two requests per poll, because Connect splits the data:
+      GET /api/v1/printers/{uuid}      -> state + telemetry (temperatures)
+      GET /api/v1/jobs?printer={uuid}  -> progress, file name, finish time
+
+    Configuration requirements:
+    - bearer_token: JWT for the Authorization header (from a signed-in Connect
+      session; Prusa publishes no token-issuing endpoint, so it is supplied by hand)
+    - printer_uuid: printer UUID, as listed by GET /api/v1/printers
+    """
+
+    DEFAULT_BASE_URL = "https://connect-mobile-api.prusa3d.com"
+
+    def __init__(
+        self,
+        base_url: str,
+        config: Optional[AppConfig] = None,
+        parent: Optional[QObject] = None,
+    ):
+        """Initialize the Connect adapter."""
+        super().__init__(base_url or self.DEFAULT_BASE_URL, config, parent)
+
+        if not config:
+            raise ValueError(
+                "PrusaConnect requires configuration with bearer_token and printer_uuid"
+            )
+        if not config.bearer_token:
+            raise ValueError("PrusaConnect requires bearer_token in configuration")
+        if not config.printer_uuid:
+            raise ValueError("PrusaConnect requires printer_uuid in configuration")
+
+        self._printer_data: Optional[Dict[str, Any]] = None
+
+    @property
+    def endpoint(self) -> str:
+        """Printer detail endpoint (state + telemetry)."""
+        return f"/api/v1/printers/{self.config.printer_uuid}"
+
+    def build_request(self, path: str) -> QNetworkRequest:
+        """Build a Connect request carrying the JWT."""
+        request = super().build_request(path)
+        token = self.config.bearer_token
+        # Accept a bare JWT or one the user pasted with its scheme already on it.
+        if " " not in token:
+            token = f"Bearer {token}"
+        request.setRawHeader(b"Authorization", token.encode("utf-8"))
+        return request
+
+    def parse_response(self, data: Dict[str, Any]) -> PrinterState:
+        """Parse a printer resource on its own (no job info)."""
+        return parse_prusa_connect_state(data)
 
     def fetch_state_async(self) -> None:
-        """
-        Fetch state with automatic endpoint fallback.
+        """Fetch the printer resource, then its current job."""
+        reply = self._network_manager.get(self.build_request(self.endpoint))
+        reply.finished.connect(lambda: self._handle_printer_reply(reply))
 
-        Tries /api/v1/status first, falls back to /api/job if needed.
-        Uses 5-second timeout for responsiveness.
-        """
-        # If we already know which endpoint works, use it
-        if self._use_legacy or self._tried_v1:
-            super().fetch_state_async()
+    def _handle_printer_reply(self, reply: QNetworkReply) -> None:
+        """Store the printer resource, then chain the jobs request."""
+        data = self._read_json(reply)
+        reply.deleteLater()
+        if data is None:
             return
 
-        # First time: try v1 endpoint
-        url = QUrl(f"{self.base_url}/api/v1/status")
-        request = QNetworkRequest(url)
-        request.setTransferTimeout(5000)  # 5s timeout - fail fast
-        request.setRawHeader(b"Accept", b"application/json")
+        self._printer_data = data
+        # Chain from the event loop, not from inside this finished handler.
+        QTimer.singleShot(0, self._fetch_jobs)
 
-        # Add authentication headers
-        if self.config:
-            auth_headers = build_auth_headers(self.config)
-            for header_name, header_value in auth_headers.items():
-                request.setRawHeader(header_name, header_value)
+    def _fetch_jobs(self) -> None:
+        """Fetch the printer's most recent job."""
+        path = f"/api/v1/jobs?printer={self.config.printer_uuid}&itemsPerPage=1"
+        reply = self._network_manager.get(self.build_request(path))
+        reply.finished.connect(lambda: self._handle_jobs_reply(reply))
 
-        logger.debug(f"Trying v1 endpoint: {url.toString()}")
+    def _handle_jobs_reply(self, reply: QNetworkReply) -> None:
+        """Combine the job list with the stored printer resource and emit."""
+        data = self._read_json(reply, required=False)
+        reply.deleteLater()
 
-        reply = self._network_manager.get(request)
-        reply.finished.connect(lambda: self._handle_v1_reply(reply))
+        # Plain JSON gives a list; the JSON-LD variant wraps it in hydra:member.
+        if isinstance(data, dict):
+            data = data.get("hydra:member")
+        job = data[0] if isinstance(data, list) and data else None
 
-    def _handle_v1_reply(self, reply: QNetworkReply) -> None:
-        """Handle v1 endpoint reply with fallback logic."""
-        try:
-            error = reply.error()
-            http_status = reply.attribute(
-                QNetworkRequest.Attribute.HttpStatusCodeAttribute
-            )
-            self._last_http_status = http_status
-
-            if error == QNetworkReply.NetworkError.NoError:
-                # V1 endpoint works!
-                data = reply.readAll().data()
-                import json
-
-                parsed = json.loads(data.decode("utf-8"))
-                state = self.parse_response(parsed)
-                state.last_ok_timestamp = datetime.now()
-                self._tried_v1 = True
-                self.state_fetched.emit(state)
-            elif http_status == 404:
-                # V1 not available, try legacy
-                logger.info("V1 endpoint not found, trying legacy /api/job")
-                self._use_legacy = True
-                self._tried_v1 = True
-                super().fetch_state_async()
-            elif http_status == 401 or http_status == 403:
-                # Authentication failure
-                error_msg = f"Authentication failed (HTTP {http_status})"
-                logger.error(error_msg)
-                error_state = PrinterState(
-                    status=PrinterStatus.ERROR,
-                    error_message="Auth failed - check credentials",
-                    message=error_msg,
-                )
-                self._tried_v1 = True
-                self.state_fetched.emit(error_state)
-            else:
-                # Other error, try legacy as fallback
-                error_string = reply.errorString()
-                logger.warning(f"V1 endpoint error: {error_string}, trying legacy")
-                self._use_legacy = True
-                self._tried_v1 = True
-                super().fetch_state_async()
-        except Exception as e:
-            logger.error(f"Error handling v1 reply: {e}", exc_info=True)
-            # Try legacy on parse errors too
-            self._use_legacy = True
-            self._tried_v1 = True
-            super().fetch_state_async()
-        finally:
-            reply.deleteLater()
+        self.state_fetched.emit(
+            parse_prusa_connect_state(self._printer_data or {}, job)
+        )
 
 
 class OctoPrintAdapter(HttpJsonAdapter):

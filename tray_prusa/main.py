@@ -12,6 +12,8 @@ from tray_prusa.poller import PrinterPoller
 from tray_prusa.adapter_factory import create_adapter, validate_config
 from tray_prusa.models import AppConfig
 from tray_prusa import keyring_util
+from tray_prusa import startup_util
+from tray_prusa.notifications import NotificationManager
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,14 @@ class PrusaTrayApp:
         # Check for required credentials and prompt if missing
         check_and_prompt_for_credentials(config)
 
+        # Sync Windows startup setting with configuration
+        if config.start_with_windows:
+            if not startup_util.is_startup_enabled():
+                logger.info(
+                    "Enabling Windows startup (config says enabled but it's not)"
+                )
+                startup_util.set_startup_enabled(True)
+
         # Create adapter based on config
         adapter = create_adapter(config)
 
@@ -97,8 +107,19 @@ class PrusaTrayApp:
             adapter=adapter, interval_seconds=config.polling_interval_seconds
         )
 
+        # Create notification manager
+        self.notification_manager = NotificationManager(self.tray_icon.tray_icon)
+        self.notification_manager.update_preferences(
+            notify_on_print_start=config.notify_on_print_start,
+            notify_on_print_complete=config.notify_on_print_complete,
+            notify_on_print_paused=config.notify_on_print_paused,
+            notify_on_print_error=config.notify_on_print_error,
+            notify_on_printer_offline=config.notify_on_printer_offline,
+        )
+
         # Connect signals
         self.poller.state_updated.connect(self.tray_icon.update_state)
+        self.poller.state_updated.connect(self.notification_manager.handle_state_change)
 
         # Show startup message
         backend_info = f"backend={config.backend}"
@@ -138,6 +159,15 @@ class PrusaTrayApp:
             # Update polling interval if changed
             if new_config.poll_interval_s != self.config_manager.config.poll_interval_s:
                 self.poller.interval_seconds = new_config.poll_interval_s
+
+            # Update notification preferences
+            self.notification_manager.update_preferences(
+                notify_on_print_start=new_config.notify_on_print_start,
+                notify_on_print_complete=new_config.notify_on_print_complete,
+                notify_on_print_paused=new_config.notify_on_print_paused,
+                notify_on_print_error=new_config.notify_on_print_error,
+                notify_on_printer_offline=new_config.notify_on_printer_offline,
+            )
 
             logger.info("Adapter hot-swapped successfully")
 

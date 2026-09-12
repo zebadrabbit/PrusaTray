@@ -1,0 +1,17 @@
+[
+  {
+    "id": "7f3c1a90",
+    "connectId": 9911,
+    "state": "PRINTING",
+    "progress": 42.5,
+    "material": "PLA",
+    "fileName": "benchy.bgcode",
+    "startAt": 1706745600,
+    "endAt": 1706747447,
+    "estimatedPrintTime": 2829,
+    "printerUuid": "0f9d7c2a-3b41-4f6e-9c2d-8a1b5e7f4d33",
+    "printerName": "MK4 Office",
+    "printerState": "PRINTING",
+    "printerSpeed": 100
+  }
+]

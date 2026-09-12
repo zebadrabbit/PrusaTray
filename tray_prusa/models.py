@@ -12,6 +12,9 @@ class PrinterStatus(Enum):
     IDLE = "idle"
     PRINTING = "printing"
     PAUSED = "paused"
+    ATTENTION = (
+        "attention"  # Printer needs user action (filament runout, cover open...)
+    )
     ERROR = "error"
     OFFLINE = "offline"
     UNKNOWN = "unknown"
@@ -95,6 +98,14 @@ class AppConfig:
     backend: str = "demo"  # "demo", "prusaconnect", "prusalink", "octoprint"
     open_ui_path: str = "/"  # Path to append to base URL for "Open printer UI"
     icon_style: str = "ring"  # "ring" or "bar" (legacy)
+    start_with_windows: bool = False  # Auto-start with Windows
+
+    # Notification settings (all default to False - opt-in)
+    notify_on_print_start: bool = False  # Notify when print starts
+    notify_on_print_complete: bool = False  # Notify when print completes
+    notify_on_print_paused: bool = False  # Notify when print pauses
+    notify_on_print_error: bool = False  # Notify on printer error
+    notify_on_printer_offline: bool = False  # Notify when printer goes offline
 
     # Authentication settings
     username: Optional[str] = None  # Username for digest auth or API key name
@@ -104,12 +115,9 @@ class AppConfig:
     )
     # Note: password/API key stored securely in keyring or env var, NOT in config
 
-    # PrusaConnect specific settings
-    bearer_token: Optional[str] = None  # Bearer token for PrusaConnect authentication
-    printer_id: Optional[str] = None  # Printer ID for PrusaConnect
-    status_path: Optional[str] = (
-        None  # Custom endpoint path (defaults to /api/v1/status)
-    )
+    # Prusa Connect settings (cloud, via connect-mobile-api.prusa3d.com)
+    bearer_token: Optional[str] = None  # JWT for the Authorization header
+    printer_uuid: Optional[str] = None  # Printer UUID as shown by GET /api/v1/printers
 
     @property
     def polling_interval_seconds(self) -> float:

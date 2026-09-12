@@ -24,7 +24,13 @@ No authentication required. Used for:
 ```
 
 ### Digest Authentication
-Username and password authentication using HTTP Digest Auth (or Basic Auth fallback).
+Username and password authentication using HTTP Digest Auth. The challenge/response
+is performed by Qt (`QNetworkAccessManager.authenticationRequired`); PrusaTray only
+supplies the credentials. This is the scheme PrusaLink's OpenAPI spec defines.
+
+Buddy firmware (MK4/MK3.9/XL/MINI) additionally accepts the PrusaLink password as
+an `X-Api-Key` header, so that header is sent up front in digest mode too - most
+requests then succeed without a challenge round-trip.
 
 **Use cases:**
 - PrusaLink with authentication enabled
@@ -135,9 +141,10 @@ The "Test Connection" feature:
 ```
 1. Load config → get username
 2. Retrieve password from keyring
-3. Build Authorization header: Basic {base64(username:password)}
-4. Send request with Authorization header
-5. Handle auth failures (401/403)
+3. Send request with X-Api-Key: {password}   (accepted by Buddy firmware)
+4. On a 401 with a Digest challenge, Qt emits authenticationRequired
+5. Supply username + password once per request; a repeat challenge means the
+   credentials are wrong, so it is refused rather than retried in a loop
 ```
 
 ### API Key Mode
@@ -197,15 +204,17 @@ Password stored in keyring: `http://192.168.1.100:maker`
 API key stored in keyring: `http://192.168.1.100:5000:octoprint-api`
 
 ### Prusa Connect
+Connect does not use `auth_mode`, `username` or the keyring at all. It authenticates
+with a JWT in the `Authorization` header, held in the config file:
 ```json
 {
-  "printer_base_url": "https://connect.prusa3d.com",
   "backend": "prusaconnect",
-  "auth_mode": "apikey",
-  "username": "connect-api"
+  "bearer_token": "eyJhbGciOi...",
+  "printer_uuid": "0f9d7c2a-3b41-4f6e-9c2d-8a1b5e7f4d33"
 }
 ```
-API key stored in keyring: `https://connect.prusa3d.com:connect-api`
+The host is fixed at `https://connect-mobile-api.prusa3d.com`. See the Prusa Connect
+section of README.md for how to obtain the token.
 
 ## Switching Authentication
 
@@ -243,23 +252,32 @@ Or use Windows Credential Manager UI.
 Pure function in `adapters.py`:
 ```python
 def build_auth_headers(config: AppConfig) -> Dict[bytes, bytes]:
-    """Build authentication headers based on config."""
-    headers = {}
-    
-    if config.auth_mode == "apikey":
-        api_key = keyring_util.get_password(config.printer_base_url, config.username)
-        if api_key:
-            headers[b"X-Api-Key"] = api_key.encode('utf-8')
-    
-    elif config.auth_mode == "digest":
-        password = keyring_util.get_password(config.printer_base_url, config.username)
-        if password:
-            # Basic auth as fallback (full digest requires challenge/response)
-            credentials = f"{config.username}:{password}"
-            b64 = base64.b64encode(credentials.encode('utf-8')).decode('ascii')
-            headers[b"Authorization"] = f"Basic {b64}".encode('utf-8')
-    
-    return headers
+    """Build authentication headers for a PrusaLink/OctoPrint request."""
+    if config.auth_mode not in ("apikey", "digest"):
+        return {}
+
+    secret = get_credential(config)
+    if not secret:
+        return {}
+
+    return {b"X-Api-Key": secret.encode("utf-8")}
+```
+
+`get_credential()` looks the secret up by `password_key`, falling back to the legacy
+`url:username` keyring entry that the settings dialog writes.
+
+Digest is not a header PrusaTray builds - `HttpJsonAdapter` connects
+`QNetworkAccessManager.authenticationRequired` and answers the challenge there:
+```python
+def _authenticate(self, reply, authenticator) -> None:
+    if self._auth_attempted or not self.config:
+        return  # answering the same challenge twice means bad credentials
+    password = get_credential(self.config)
+    if not password:
+        return
+    self._auth_attempted = True
+    authenticator.setUser(self.config.username or "maker")
+    authenticator.setPassword(password)
 ```
 
 ### HttpJsonAdapter

@@ -1,0 +1,16 @@
+{
+  "id": 420,
+  "state": "PRINTING",
+  "progress": 42.5,
+  "time_remaining": 1847,
+  "time_printing": 982,
+  "inaccurate_estimates": false,
+  "file": {
+    "name": "BENCHY~1.BGC",
+    "display_name": "benchy.bgcode",
+    "path": "/usb",
+    "display_path": "/usb",
+    "size": 2457680,
+    "m_timestamp": 1706745600
+  }
+}

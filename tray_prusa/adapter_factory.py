@@ -45,10 +45,11 @@ def create_adapter(config: AppConfig) -> AdapterType:
         return DemoAdapter()
 
     elif backend == "prusaconnect":
-        # Prusa Connect cloud API
-        if not config.printer_base_url:
-            raise ValueError("printer_base_url required for prusaconnect backend")
-        return PrusaConnectAdapter(config.printer_base_url, config)
+        # Prusa Connect cloud API - the host is fixed, so printer_base_url is
+        # only an override for testing against a different gateway.
+        return PrusaConnectAdapter(
+            config.printer_base_url or PrusaConnectAdapter.DEFAULT_BASE_URL, config
+        )
 
     elif backend == "prusalink":
         # PrusaLink local API
@@ -85,8 +86,15 @@ def validate_config(config: AppConfig) -> None:
     if backend == "demo":
         return
 
-    # All other backends require a URL
-    if backend in ("prusaconnect", "prusalink", "octoprint"):
+    if backend == "prusaconnect":
+        if not config.bearer_token:
+            raise ValueError("Backend 'prusaconnect' requires bearer_token to be set.")
+        if not config.printer_uuid:
+            raise ValueError("Backend 'prusaconnect' requires printer_uuid to be set.")
+        return
+
+    # Local backends require a URL
+    if backend in ("prusalink", "octoprint"):
         if not config.printer_base_url:
             raise ValueError(
                 f"Backend '{backend}' requires printer_base_url to be set. "

@@ -1,7 +1,7 @@
 """Test PrusaLink parser implementation."""
 
 import sys
-from tray_prusa.adapters import parse_prusalink_state
+from tray_prusa.adapters import parse_prusalink_state, parse_prusalink_job_name
 from tray_prusa.models import PrinterStatus
 
 
@@ -19,14 +19,16 @@ def test_prusalink_printing():
             "id": 123,
             "progress": 45.5,
             "time_remaining": 1800,
-            "time_printing": 900,
-            "file": {
-                "name": "test_model.gcode"
-            }
+            "time_printing": 900
         }
     }
     
-    state = parse_prusalink_state(data)
+    # /api/v1/status has no file name; PrusaLinkAdapter supplies it from
+    # /api/v1/job, so pass it in the way the adapter does.
+    job_name = parse_prusalink_job_name(
+        {"id": 123, "file": {"name": "TEST_M~1.GCO", "display_name": "test_model.gcode"}}
+    )
+    state = parse_prusalink_state(data, job_name)
     
     assert state.status == PrinterStatus.PRINTING, f"Expected PRINTING, got {state.status}"
     assert abs(state.progress - 0.455) < 0.001, f"Expected 0.455, got {state.progress}"

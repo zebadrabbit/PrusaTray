@@ -111,14 +111,14 @@ def test_auth_headers_digest():
         )
         
         headers = build_auth_headers(config)
-        assert b"Authorization" in headers, "Authorization header not found"
         
-        # Should contain Basic auth as fallback
-        auth_value = headers[b"Authorization"].decode('utf-8')
-        assert auth_value.startswith("Basic "), "Expected Basic auth header"
+        # Digest challenge/response is done by Qt (authenticationRequired), not
+        # by a header we build. Buddy firmware also takes the PrusaLink password
+        # as X-Api-Key, so that is what goes on the request up front.
+        assert b"Authorization" not in headers, "Must not fake Basic auth for digest"
+        assert headers[b"X-Api-Key"] == test_password.encode(), "X-Api-Key not set"
         
-        print(f"  Added Authorization header: {auth_value[:20]}...")
-        print("✓ Digest auth headers added correctly")
+        print("✓ Digest mode sends X-Api-Key; Qt answers the digest challenge")
         
     finally:
         delete_password(test_url, test_username)

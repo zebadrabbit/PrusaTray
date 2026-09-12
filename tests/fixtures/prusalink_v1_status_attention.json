@@ -1,0 +1,17 @@
+{
+  "printer": {
+    "state": "ATTENTION",
+    "temp_nozzle": 214.9,
+    "target_nozzle": 215.0,
+    "temp_bed": 59.5,
+    "target_bed": 60.0,
+    "status_printer": {"ok": false, "message": "Filament runout"},
+    "status_connect": {"ok": true, "message": "OK"}
+  },
+  "job": {
+    "id": 420,
+    "progress": 42.5,
+    "time_remaining": -1,
+    "time_printing": 982
+  }
+}
