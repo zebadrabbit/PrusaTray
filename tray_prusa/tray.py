@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
     QWidget,
+    QCheckBox,
 )
 from PySide6.QtGui import QAction
 from PySide6.QtCore import QObject, Signal, QThread
@@ -26,6 +27,7 @@ from .models import PrinterState, PrinterStatus, AppConfig
 from .icon import create_tray_icon
 from .config import ConfigManager
 from . import keyring_util
+from . import startup_util
 
 logger = logging.getLogger(__name__)
 
@@ -307,22 +309,21 @@ class ConnectionTestWorker(QThread):
             test_url = f"{self.base_url.rstrip('/')}/api/v1/status"
             request = QNetworkRequest(QUrl(test_url))
 
-            # Add authentication
-            if self.auth_mode == "apikey":
-                # API key mode: add X-Api-Key header
+            # PrusaLink accepts the password as X-Api-Key in both modes;
+            # a real Digest challenge is answered below via authenticationRequired.
+            if self.auth_mode in ("apikey", "digest") and self.password:
                 request.setRawHeader(b"X-Api-Key", self.password.encode("utf-8"))
-            elif self.auth_mode == "digest":
-                # Digest auth needs to be handled differently
-                # For now, we'll send basic auth as a test
-                import base64
 
-                credentials = f"{self.username}:{self.password}"
-                b64_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
-                    "ascii"
-                )
-                request.setRawHeader(
-                    b"Authorization", f"Basic {b64_credentials}".encode("utf-8")
-                )
+            answered = []
+
+            def _authenticate(_reply, authenticator):
+                if answered:  # same challenge twice = wrong credentials
+                    return
+                answered.append(True)
+                authenticator.setUser(self.username or "maker")
+                authenticator.setPassword(self.password)
+
+            manager.authenticationRequired.connect(_authenticate)
 
             # Send request with timeout
             reply = manager.get(request)
@@ -383,7 +384,7 @@ class CredentialsDialog(QDialog):
 
         self.setWindowTitle("Set Printer Credentials")
         self.setModal(True)
-        self.resize(400, 300)
+        self.resize(400, 500)
 
         # Get current config
         config = config_manager.config
@@ -433,6 +434,55 @@ class CredentialsDialog(QDialog):
 
         # Update labels based on auth mode
         self._on_auth_mode_changed(current_mode)
+
+        # Add spacing before startup options
+        layout.addSpacing(15)
+
+        # Startup section
+        startup_label = QLabel("Startup Options:")
+        startup_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(startup_label)
+
+        # Start with Windows checkbox
+        self.startup_checkbox = QCheckBox("Start PrusaTray with Windows")
+        self.startup_checkbox.setChecked(config.start_with_windows)
+        layout.addWidget(self.startup_checkbox)
+
+        # Add spacing before notifications
+        layout.addSpacing(15)
+
+        # Notifications section
+        notifications_label = QLabel("Notifications:")
+        notifications_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(notifications_label)
+
+        # Notification checkboxes
+        self.notify_print_start_checkbox = QCheckBox("Notify when print starts")
+        self.notify_print_start_checkbox.setChecked(config.notify_on_print_start)
+        layout.addWidget(self.notify_print_start_checkbox)
+
+        self.notify_print_complete_checkbox = QCheckBox("Notify when print completes")
+        self.notify_print_complete_checkbox.setChecked(config.notify_on_print_complete)
+        layout.addWidget(self.notify_print_complete_checkbox)
+
+        self.notify_print_paused_checkbox = QCheckBox("Notify when print pauses")
+        self.notify_print_paused_checkbox.setChecked(config.notify_on_print_paused)
+        layout.addWidget(self.notify_print_paused_checkbox)
+
+        self.notify_print_error_checkbox = QCheckBox("Notify on printer error")
+        self.notify_print_error_checkbox.setChecked(config.notify_on_print_error)
+        layout.addWidget(self.notify_print_error_checkbox)
+
+        self.notify_printer_offline_checkbox = QCheckBox(
+            "Notify when printer goes offline"
+        )
+        self.notify_printer_offline_checkbox.setChecked(
+            config.notify_on_printer_offline
+        )
+        layout.addWidget(self.notify_printer_offline_checkbox)
+
+        # Add spacing after notifications
+        layout.addSpacing(10)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -547,6 +597,7 @@ class CredentialsDialog(QDialog):
 
         # Create new config
         config = self.config_manager.config
+        start_with_windows = self.startup_checkbox.isChecked()
         new_config = AppConfig(
             printer_base_url=base_url if base_url else None,
             poll_interval_s=config.poll_interval_s,
@@ -555,6 +606,12 @@ class CredentialsDialog(QDialog):
             icon_style=config.icon_style,
             username=username if username and auth_mode != "none" else None,
             auth_mode=auth_mode,
+            start_with_windows=start_with_windows,
+            notify_on_print_start=self.notify_print_start_checkbox.isChecked(),
+            notify_on_print_complete=self.notify_print_complete_checkbox.isChecked(),
+            notify_on_print_paused=self.notify_print_paused_checkbox.isChecked(),
+            notify_on_print_error=self.notify_print_error_checkbox.isChecked(),
+            notify_on_printer_offline=self.notify_printer_offline_checkbox.isChecked(),
         )
 
         # Save config
@@ -572,6 +629,19 @@ class CredentialsDialog(QDialog):
                     QMessageBox.warning(
                         self, "Warning", "Failed to store password securely"
                     )
+
+            # Update Windows startup setting
+            if startup_util.set_startup_enabled(start_with_windows):
+                logger.info(
+                    f"Windows startup {'enabled' if start_with_windows else 'disabled'}"
+                )
+            else:
+                logger.warning("Failed to update Windows startup setting")
+                QMessageBox.warning(
+                    self,
+                    "Warning",
+                    "Failed to update Windows startup setting. You may need administrator privileges.",
+                )
 
             super().accept()
 

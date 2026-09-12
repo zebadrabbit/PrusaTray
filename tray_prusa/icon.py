@@ -29,6 +29,9 @@ def get_status_color(status: PrinterStatus) -> QColor:
         PrinterStatus.IDLE: QColor(128, 128, 128),  # Gray
         PrinterStatus.PRINTING: QColor(0, 150, 255),  # Blue
         PrinterStatus.PAUSED: QColor(255, 165, 0),  # Orange
+        PrinterStatus.ATTENTION: QColor(
+            255, 215, 0
+        ),  # Amber - needs you at the printer
         PrinterStatus.ERROR: QColor(255, 0, 0),  # Red
         PrinterStatus.OFFLINE: QColor(150, 0, 0),  # Dark red
         PrinterStatus.UNKNOWN: QColor(100, 100, 100),  # Dark gray
@@ -192,7 +195,11 @@ def _draw_status_overlay(
     if status == PrinterStatus.PAUSED:
         # Draw pause symbol "||"
         _draw_pause_overlay(painter, size, color)
-    elif status in (PrinterStatus.ERROR, PrinterStatus.OFFLINE):
+    elif status in (
+        PrinterStatus.ATTENTION,
+        PrinterStatus.ERROR,
+        PrinterStatus.OFFLINE,
+    ):
         # Draw alert symbol "!"
         _draw_alert_overlay(painter, size, color)
 

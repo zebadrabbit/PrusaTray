@@ -13,6 +13,14 @@ Windows system tray application for monitoring Prusa printers via PrusaLink and 
 - **Tray-only interface**: No windows, runs entirely in the system tray
 - **Config UI**: Set printer URL directly from tray menu - no manual file editing
 - **Hot-swapping**: Switch from demo to real printer without restarting app
+- **Start with Windows**: Optional auto-start on Windows boot for continuous monitoring
+- **Configurable Notifications**: Windows toast notifications for printer events:
+  - Print started
+  - Print completed
+  - Print paused
+  - Printer error
+  - Printer offline
+  - All notifications opt-in (disabled by default)
 - **Secure Authentication**: 
   - Digest auth (username + password) and API key support
   - Passwords stored securely in Windows Credential Manager (never in config file)
@@ -205,42 +213,56 @@ Simulates a 2-minute print cycle with pause and idle phases. No network calls - 
 
 #### PrusaConnect Backend
 
-For **PrusaConnect** cloud monitoring:
+For **Prusa Connect** cloud monitoring, via Prusa's documented Connect mobile API
+gateway ([OpenAPI spec](https://connect-mobile-api.prusa3d.com/api/docs)):
 
 ```json
 {
   "backend": "prusaconnect",
-  "printer_base_url": "https://connect.prusa3d.com",
-  "bearer_token": "your_bearer_token_here",
-  "printer_id": "your_printer_id",
-  "status_path": "/api/v1/status",
+  "bearer_token": "eyJhbGciOi...your_jwt_here",
+  "printer_uuid": "0f9d7c2a-3b41-4f6e-9c2d-8a1b5e7f4d33",
   "poll_interval_s": 10.0
 }
 ```
 
 **Required fields:**
-- **bearer_token**: Bearer token from Prusa Connect account
-- **printer_id**: Your printer's unique identifier
+- **bearer_token**: JWT sent in the `Authorization` header
+- **printer_uuid**: Printer UUID, from `GET /api/v1/printers` (it also appears in
+  the connect.prusa3d.com URL when you open that printer's page)
 
 **Optional fields:**
-- **status_path**: Custom API endpoint (defaults to `/api/v1/status`)
-- **poll_interval_s**: Recommended 10+ seconds for cloud API (to avoid rate limiting)
+- **printer_base_url**: Only to point at a different gateway. The host defaults to
+  `https://connect-mobile-api.prusa3d.com`
+- **poll_interval_s**: Recommended 10+ seconds; this backend makes two requests per
+  poll and it is a cloud service
 
-**How to get your bearer token:**
-1. Log in to [connect.prusa3d.com](https://connect.prusa3d.com)
-2. Navigate to account settings → API settings
-3. Generate an API token/bearer token
-4. Copy and paste into `bearer_token` field
+**How to get your token:**
 
-**Timeouts:** 5-second request timeout. Cloud API should respond quickly.
+Prusa publishes no endpoint that mints an API token for Connect, so it has to be
+taken from a signed-in session:
 
-> **Note:** PrusaConnect uses bearer token authentication. The `auth_mode` and `username` settings are ignored.
+1. Sign in at [connect.prusa3d.com](https://connect.prusa3d.com)
+2. Open browser devtools → Network tab, and click any printer
+3. Copy the `Authorization` header value from any `/api/v1` request
+4. Paste it into `bearer_token` (with or without the `Bearer ` prefix)
+
+Tokens expire. If the tray goes offline with an authentication error, repeat the
+steps above.
+
+**Endpoints used:**
+- `GET /api/v1/printers/{uuid}` - state and telemetry (temperatures)
+- `GET /api/v1/jobs?printer={uuid}&itemsPerPage=1` - progress, file name, finish time
+
+**Timeouts:** 5-second request timeout.
+
+> **Note:** Prusa Connect uses bearer token auth. The `auth_mode`, `username` and
+> `password_key` settings are ignored for this backend.
 
 ---
 
 #### PrusaLink Backend
 
-For **PrusaLink** (local printer API with digest auth):
+For **PrusaLink** (the printer's own local API):
 
 ```json
 {
@@ -256,15 +278,29 @@ For **PrusaLink** (local printer API with digest auth):
 
 **Required fields:**
 - **printer_base_url**: Local IP address of your Prusa printer (e.g., `http://192.168.1.100`)
-- **auth_mode**: Set to `"digest"` for PrusaLink
+- **auth_mode**: `"digest"` for a PrusaLink username + password, `"apikey"` if you
+  have an API key instead
 - **username**: PrusaLink username (default is `"maker"`)
 - **password_key**: Reference name for secure credential storage
 
-**Features:**
-- Automatic endpoint detection (tries `/api/v1/status` → falls back to `/api/job`)
-- Digest authentication
-- Supports both modern and legacy PrusaLink formats
-- 5-second timeout for local network
+The username, password and IP are on the printer under
+**Settings → Network → PrusaLink**.
+
+**Endpoints used** ([PrusaLink OpenAPI spec](https://github.com/prusa3d/Prusa-Link-Web/blob/master/spec/openapi.yaml)):
+- `GET /api/v1/status` - printer state, temperatures, job progress and time remaining
+- `GET /api/v1/job` - the printing file's name, which `/api/v1/status` does not carry.
+  Fetched once per job and reused until the job id changes, not on every poll
+- `GET /api/job` - legacy fallback, used automatically if `/api/v1/status` returns 404
+  (PrusaLink 0.7.x)
+
+**Authentication:** PrusaLink's spec defines HTTP Digest, which Qt answers via the
+`authenticationRequired` challenge. Buddy firmware (MK4/MK3.9/XL/MINI) also accepts
+the PrusaLink password as an `X-Api-Key` header, so PrusaTray sends both.
+
+**Printer states** are the API v1 set - `IDLE`, `BUSY`, `PRINTING`, `PAUSED`,
+`FINISHED`, `STOPPED`, `ERROR`, `ATTENTION`, `READY`. `ATTENTION` gets its own amber
+tray icon, and the reason (for example "Filament runout") is read from
+`printer.status_printer.message` and shown in the tooltip.
 
 **First-time setup:**
 1. Configure as above with `password_key`
@@ -320,8 +356,8 @@ For **OctoPrint** (API key authentication):
 | Backend | Network | Auth | Timeout | Endpoints |
 |---------|---------|------|---------|-----------|
 | **demo** | None | None | N/A | N/A - simulated |
-| **prusaconnect** | Cloud | Bearer token | 5s | `/api/v1/status` |
-| **prusalink** | Local | Digest | 5s | `/api/v1/status` + `/api/job` fallback |
+| **prusaconnect** | Cloud | Bearer token (JWT) | 5s | `/api/v1/printers/{uuid}` + `/api/v1/jobs` |
+| **prusalink** | Local | Digest / X-Api-Key | 5s | `/api/v1/status` + `/api/v1/job`, `/api/job` fallback |
 | **octoprint** | Local | API key | 5s | `/api/job` |
 
 ### Backend Swapping
@@ -384,7 +420,8 @@ tests/
     ├── prusalink_v1_status_printing.json
     ├── prusalink_legacy_job_printing.json
     ├── octoprint_job_printing.json
-    └── prusaconnect_status_sample.json
+    ├── prusaconnect_printer.json
+    └── prusaconnect_jobs.json
 ```
 
 ### Adapter Pattern
@@ -399,8 +436,8 @@ The app uses a **clean adapter abstraction** with full backend implementations:
 
 **Implemented Adapters:**
 - ✅ **DemoAdapter**: Simulated printer for testing (5 tests)
-- ✅ **PrusaConnectAdapter**: Cloud API with bearer token auth (18 tests)
-- ✅ **PrusaLinkAdapter**: Local API with digest auth, dual endpoint support (12 tests)
+- ✅ **PrusaConnectAdapter**: Connect mobile API with bearer token auth
+- ✅ **PrusaLinkAdapter**: API v1 with digest auth, legacy endpoint fallback
 - ✅ **OctoPrintAdapter**: OctoPrint REST API with API key auth (13 tests)
 
 All adapters include real API fixture tests using actual response samples.

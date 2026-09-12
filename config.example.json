@@ -1,17 +1,25 @@
 {
   "_comment": "Example PrusaTray configuration with secure credential storage",
-  
+
   "printer_base_url": "http://192.168.1.100",
   "poll_interval_s": 3.0,
   "backend": "prusalink",
   "open_ui_path": "/",
   "icon_style": "ring",
-  
+  "start_with_windows": false,
+
+  "_notification_comment": "Notification preferences (all default to false)",
+  "notify_on_print_start": false,
+  "notify_on_print_complete": false,
+  "notify_on_print_paused": false,
+  "notify_on_print_error": false,
+  "notify_on_printer_offline": false,
+
   "_auth_comment": "Authentication configuration",
   "auth_mode": "digest",
   "username": "maker",
   "password_key": "prusalink:mk4-office",
-  
+
   "_password_key_notes": [
     "password_key is a reference name for the credential",
     "Choose a descriptive name like 'prusalink:mk4-office' or 'octoprint:garage'",
@@ -25,23 +33,33 @@
     "",
     "See CREDENTIAL_STORAGE.md for complete documentation"
   ],
-  
+
   "_backend_examples": {
     "demo": {
       "backend": "demo",
       "printer_base_url": null,
       "_description": "Demo mode with simulated printer"
     },
-    
+
     "prusalink": {
       "backend": "prusalink",
       "printer_base_url": "http://192.168.1.100",
       "auth_mode": "digest",
       "username": "maker",
       "password_key": "prusalink:office-mk4",
-      "_description": "Local PrusaLink with digest authentication"
+      "_description": "Local PrusaLink, API v1 (/api/v1/status + /api/v1/job)",
+      "_notes": [
+        "Buddy firmware (MK4/MK3.9/XL/MINI) and PrusaLink 0.8+ speak API v1.",
+        "PrusaLink 0.7.x has no /api/v1; the adapter falls back to /api/job.",
+        "Username and password are the PrusaLink credentials shown on the",
+        "printer under Settings > Network > PrusaLink (default user 'maker').",
+        "auth_mode 'digest' answers the printer's Digest challenge and also",
+        "sends the password as X-Api-Key, which Buddy firmware accepts.",
+        "auth_mode 'apikey' sends only X-Api-Key - use it if you have an API",
+        "key rather than a password."
+      ]
     },
-    
+
     "octoprint": {
       "backend": "octoprint",
       "printer_base_url": "http://192.168.1.200",
@@ -50,14 +68,28 @@
       "password_key": "octoprint:mk3s",
       "_description": "OctoPrint with API key authentication"
     },
-    
+
     "prusaconnect": {
       "backend": "prusaconnect",
-      "printer_base_url": "https://connect.prusa3d.com",
-      "bearer_token": "your_bearer_token_here",
-      "printer_id": "your_printer_id",
-      "status_path": "/api/v1/status",
-      "_description": "PrusaConnect cloud monitoring (uses bearer_token instead of password_key)"
+      "bearer_token": "eyJhbGciOi...your_jwt_here",
+      "printer_uuid": "0f9d7c2a-3b41-4f6e-9c2d-8a1b5e7f4d33",
+      "_description": "Prusa Connect cloud, via the Connect mobile API gateway",
+      "_notes": [
+        "Host is fixed at https://connect-mobile-api.prusa3d.com; there is no",
+        "printer_base_url to set (set one only to point at a different gateway).",
+        "Spec: https://connect-mobile-api.prusa3d.com/api/docs",
+        "",
+        "Prusa publishes no way to mint a token, so you supply one by hand:",
+        "sign in at connect.prusa3d.com, open the browser devtools Network tab,",
+        "and copy the Authorization header value from any /api/v1 request.",
+        "Tokens expire - if the tray goes offline with an auth error, repeat this.",
+        "",
+        "printer_uuid is the printer's uuid from GET /api/v1/printers (it is also",
+        "in the connect.prusa3d.com URL when you open the printer's page).",
+        "",
+        "This backend polls two endpoints per cycle (printer detail and jobs),",
+        "so consider a longer poll_interval_s (10s or more) for a cloud service."
+      ]
     }
   }
 }

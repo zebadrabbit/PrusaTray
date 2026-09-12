@@ -18,15 +18,15 @@ class TestPrusaLinkParser(unittest.TestCase):
                 "temp_bed": 60.0
             },
             "job": {
+                "id": 1,
                 "progress": 45.5,
-                "time_remaining": 1800,
-                "file": {
-                    "name": "test_model.gcode"
-                }
+                "time_remaining": 1800
             }
         }
         
-        state = parse_prusalink_state(data)
+        # The file name is not in /api/v1/status; the adapter fetches it from
+        # /api/v1/job and hands it to the parser.
+        state = parse_prusalink_state(data, "test_model.gcode")
         
         self.assertEqual(state.status, PrinterStatus.PRINTING)
         self.assertAlmostEqual(state.progress, 0.455, places=3)

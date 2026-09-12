@@ -1,0 +1,21 @@
+{
+  "uuid": "0f9d7c2a-3b41-4f6e-9c2d-8a1b5e7f4d33",
+  "name": "MK4 Office",
+  "printerType": "1.3.1",
+  "printerTypeName": "MK4",
+  "state": "PRINTING",
+  "firmware": "6.1.3",
+  "material": "PLA",
+  "telemetry": {
+    "axisZ": 15.7,
+    "temperatureNozzleCurrent": 214.9,
+    "temperatureNozzleTarget": 215.0,
+    "temperatureHeatbedCurrent": 59.5,
+    "temperatureHeatbedTarget": 60.0,
+    "speed": 100,
+    "lastOnline": "2026-02-01T10:15:00+00:00"
+  },
+  "supportsTelemetry": true,
+  "teamId": 12345,
+  "teamName": "Home"
+}

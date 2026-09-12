@@ -88,6 +88,19 @@ class ConfigManager:
                     icon_style=data.get("icon_style", "ring"),
                     username=data.get("username"),
                     auth_mode=data.get("auth_mode", "none"),
+                    password_key=data.get("password_key"),
+                    bearer_token=data.get("bearer_token"),
+                    printer_uuid=data.get("printer_uuid"),
+                    start_with_windows=data.get("start_with_windows", False),
+                    notify_on_print_start=data.get("notify_on_print_start", False),
+                    notify_on_print_complete=data.get(
+                        "notify_on_print_complete", False
+                    ),
+                    notify_on_print_paused=data.get("notify_on_print_paused", False),
+                    notify_on_print_error=data.get("notify_on_print_error", False),
+                    notify_on_printer_offline=data.get(
+                        "notify_on_printer_offline", False
+                    ),
                 )
                 logger.info(f"Loaded configuration from {self.config_path}")
             except json.JSONDecodeError as e:
@@ -119,6 +132,15 @@ class ConfigManager:
             "icon_style": config.icon_style,
             "username": config.username,
             "auth_mode": config.auth_mode,
+            "password_key": config.password_key,
+            "bearer_token": config.bearer_token,
+            "printer_uuid": config.printer_uuid,
+            "start_with_windows": config.start_with_windows,
+            "notify_on_print_start": config.notify_on_print_start,
+            "notify_on_print_complete": config.notify_on_print_complete,
+            "notify_on_print_paused": config.notify_on_print_paused,
+            "notify_on_print_error": config.notify_on_print_error,
+            "notify_on_printer_offline": config.notify_on_printer_offline,
         }
 
         try:

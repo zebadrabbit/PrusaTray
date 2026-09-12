@@ -10,13 +10,27 @@ class TestNormalizeStatus(unittest.TestCase):
     
     def test_idle_variations(self):
         """Test various idle status strings."""
-        for status in ["idle", "IDLE", "ready", "operational"]:
+        # BUSY/MANIPULATING/FINISHED/STOPPED all mean "not printing right now".
+        for status in [
+            "idle",
+            "IDLE",
+            "ready",
+            "operational",
+            "busy",
+            "manipulating",
+            "finished",
+            "stopped",
+        ]:
             self.assertEqual(normalize_status(status), PrinterStatus.IDLE)
     
     def test_printing_variations(self):
         """Test various printing status strings."""
-        for status in ["printing", "PRINTING", "busy", "working"]:
+        for status in ["printing", "PRINTING", "working"]:
             self.assertEqual(normalize_status(status), PrinterStatus.PRINTING)
+    
+    def test_attention(self):
+        """ATTENTION is its own state - the printer needs the user."""
+        self.assertEqual(normalize_status("ATTENTION"), PrinterStatus.ATTENTION)
     
     def test_paused(self):
         """Test paused status."""
